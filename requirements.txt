@@ -1,0 +1,3 @@
+openai>=1.40
+pypdfium2>=4.30
+pillow>=10.4

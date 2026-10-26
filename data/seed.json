@@ -1,0 +1,71 @@
+{
+  "_note": "SYNTHETIC TEST DATA. No real patients, staff or hospital. Prices are illustrative INR amounts for a small private nursing home in North India.",
+  "tariff": [
+    {"code": "ROOM_GEN", "name": "General ward bed (incl. nursing)", "price": 2500, "unit": "per day"},
+    {"code": "CONSULT", "name": "Consultant obstetrician visit", "price": 800, "unit": "per visit"},
+    {"code": "NVD_PKG", "name": "Normal vaginal delivery package", "price": 25000, "unit": "per delivery"},
+    {"code": "IOL", "name": "Induction of labour (procedure charge)", "price": 3000, "unit": "per procedure"},
+    {"code": "NST", "name": "Non-stress test (CTG)", "price": 500, "unit": "per test"},
+    {"code": "CBC", "name": "Complete blood count", "price": 350, "unit": "per test"},
+    {"code": "LFT", "name": "Liver function test", "price": 600, "unit": "per test"},
+    {"code": "RFT", "name": "Renal function test", "price": 550, "unit": "per test"},
+    {"code": "URINE_RM", "name": "Urine routine & microscopy", "price": 150, "unit": "per test"},
+    {"code": "USG_OBS", "name": "Obstetric ultrasound", "price": 1200, "unit": "per scan"},
+    {"code": "CANNULA", "name": "IV cannulation", "price": 300, "unit": "per procedure"}
+  ],
+  "inventory": [
+    {"item_code": "LABET_TAB_100", "name": "Tab Labetalol 100 mg", "unit": "tablet", "unit_price": 6, "stock": 120, "reorder_level": 30},
+    {"item_code": "LABET_INJ_20", "name": "Inj Labetalol 20 mg/4 ml", "unit": "ampoule", "unit_price": 180, "stock": 15, "reorder_level": 5},
+    {"item_code": "MGSO4_INJ", "name": "Inj Magnesium sulphate 50% 2 ml", "unit": "ampoule", "unit_price": 30, "stock": 60, "reorder_level": 20},
+    {"item_code": "OXY_INJ_5", "name": "Inj Oxytocin 5 IU", "unit": "ampoule", "unit_price": 25, "stock": 80, "reorder_level": 20},
+    {"item_code": "MISO_TAB_25", "name": "Tab Misoprostol 25 mcg", "unit": "tablet", "unit_price": 15, "stock": 40, "reorder_level": 10},
+    {"item_code": "CEFTRI_INJ_1G", "name": "Inj Ceftriaxone 1 g", "unit": "vial", "unit_price": 65, "stock": 50, "reorder_level": 15},
+    {"item_code": "PANTO_INJ_40", "name": "Inj Pantoprazole 40 mg", "unit": "vial", "unit_price": 55, "stock": 50, "reorder_level": 15},
+    {"item_code": "ONDAN_INJ_4", "name": "Inj Ondansetron 4 mg", "unit": "ampoule", "unit_price": 20, "stock": 60, "reorder_level": 15},
+    {"item_code": "RL_500", "name": "Ringer lactate 500 ml", "unit": "bottle", "unit_price": 45, "stock": 100, "reorder_level": 30},
+    {"item_code": "PCM_TAB_500", "name": "Tab Paracetamol 500 mg", "unit": "tablet", "unit_price": 2, "stock": 300, "reorder_level": 50},
+    {"item_code": "CEFIX_TAB_200", "name": "Tab Cefixime 200 mg", "unit": "tablet", "unit_price": 12, "stock": 100, "reorder_level": 30},
+    {"item_code": "IFA_TAB", "name": "Tab Iron + Folic acid", "unit": "tablet", "unit_price": 3, "stock": 400, "reorder_level": 100}
+  ],
+  "patients": [
+    {
+      "name": "Meera Sharma (synthetic)", "age": 28, "uhid": "DEMO-1001", "bed": "12",
+      "consultant": "Dr. K. Mehta (synthetic)", "admitted_at": "2026-10-21 10:45",
+      "admitting_diagnosis": "G2P1L1, 37+2 weeks, gestational hypertension, ? pre-eclampsia",
+      "events": [
+        {"ts": "2026-10-21 10:50", "type": "service", "data": {"code": "CONSULT", "qty": 1}, "entered_by": "Reception"},
+        {"ts": "2026-10-21 11:30", "type": "service", "data": {"code": "CBC", "qty": 1}, "entered_by": "Lab"},
+        {"ts": "2026-10-21 11:30", "type": "service", "data": {"code": "NST", "qty": 1}, "entered_by": "Sister Anita (synthetic)"},
+        {"ts": "2026-10-21 14:00", "type": "vitals", "data": {"sbp": 146, "dbp": 96, "hr": 90, "rr": 18, "temp_c": 37.0, "spo2": 98, "fhr": 142, "avpu": "alert"}, "entered_by": "Sister Anita (synthetic)"},
+        {"ts": "2026-10-21 18:00", "type": "vitals", "data": {"sbp": 144, "dbp": 94, "hr": 88, "rr": 18, "temp_c": 36.9, "spo2": 98, "fhr": 140, "avpu": "alert"}, "entered_by": "Sister Anita (synthetic)"},
+        {"ts": "2026-10-21 20:00", "type": "med_admin", "data": {"item_code": "LABET_TAB_100", "qty": 1, "dose": "100 mg", "route": "oral"}, "entered_by": "Sister Anita (synthetic)"}
+      ]
+    },
+    {
+      "name": "Priya Verma (synthetic)", "age": 31, "uhid": "DEMO-1002", "bed": "7",
+      "consultant": "Dr. K. Mehta (synthetic)", "admitted_at": "2026-10-22 08:00",
+      "admitting_diagnosis": "G1, 39+1 weeks in early labour; delivered by NVD 22/10/26 14:20",
+      "events": [
+        {"ts": "2026-10-22 08:10", "type": "service", "data": {"code": "CONSULT", "qty": 1}, "entered_by": "Reception"},
+        {"ts": "2026-10-22 14:20", "type": "service", "data": {"code": "NVD_PKG", "qty": 1}, "entered_by": "Labour room"},
+        {"ts": "2026-10-22 14:25", "type": "med_admin", "data": {"item_code": "OXY_INJ_5", "qty": 2, "dose": "10 IU", "route": "IM"}, "entered_by": "Sister Rekha (synthetic)"},
+        {"ts": "2026-10-22 14:25", "type": "note", "data": {"text": "Delivered live female baby 3.0 kg, APGAR 8/9. Placenta complete. Perineum intact. EBL 250 ml."}, "entered_by": "Dr. S. Nair (synthetic)"},
+        {"ts": "2026-10-22 18:00", "type": "vitals", "data": {"sbp": 118, "dbp": 74, "hr": 84, "rr": 16, "temp_c": 37.1, "spo2": 99, "avpu": "alert"}, "entered_by": "Sister Rekha (synthetic)"},
+        {"ts": "2026-10-23 08:00", "type": "vitals", "data": {"sbp": 116, "dbp": 72, "hr": 80, "rr": 16, "temp_c": 36.8, "spo2": 99, "avpu": "alert"}, "entered_by": "Sister Rekha (synthetic)"},
+        {"ts": "2026-10-23 08:15", "type": "med_admin", "data": {"item_code": "PCM_TAB_500", "qty": 2, "dose": "1 g", "route": "oral"}, "entered_by": "Sister Rekha (synthetic)"}
+      ]
+    },
+    {
+      "name": "Sunita Devi (synthetic)", "age": 34, "uhid": "DEMO-1003", "bed": "9",
+      "consultant": "Dr. R. Iyer (synthetic)", "admitted_at": "2026-10-23 18:00",
+      "admitting_diagnosis": "P3L3, 6 hours after NVD, monitoring for postpartum haemorrhage",
+      "events": [
+        {"ts": "2026-10-23 18:05", "type": "service", "data": {"code": "CANNULA", "qty": 1}, "entered_by": "Sister Rekha (synthetic)"},
+        {"ts": "2026-10-23 18:10", "type": "med_admin", "data": {"item_code": "RL_500", "qty": 1, "dose": "500 ml", "route": "IV"}, "entered_by": "Sister Rekha (synthetic)"},
+        {"ts": "2026-10-23 18:15", "type": "vitals", "data": {"sbp": 118, "dbp": 76, "hr": 88, "rr": 18, "temp_c": 37.0, "spo2": 98, "avpu": "alert"}, "entered_by": "Sister Rekha (synthetic)"},
+        {"ts": "2026-10-23 20:15", "type": "vitals", "data": {"sbp": 104, "dbp": 68, "hr": 104, "rr": 20, "temp_c": 37.0, "spo2": 97, "avpu": "alert"}, "entered_by": "Sister Rekha (synthetic)"},
+        {"ts": "2026-10-23 22:15", "type": "vitals", "data": {"sbp": 96, "dbp": 60, "hr": 118, "rr": 22, "temp_c": 37.1, "spo2": 96, "avpu": "alert"}, "entered_by": "Sister Rekha (synthetic)"}
+      ]
+    }
+  ]
+}
