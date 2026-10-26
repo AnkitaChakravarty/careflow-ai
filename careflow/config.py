@@ -53,6 +53,7 @@ PRICE_OUTPUT = 0.50
 
 # --- Safety / cost guards -----------------------------------------------------
 DAILY_TOKEN_BUDGET = int(os.getenv("CAREFLOW_DAILY_TOKEN_BUDGET", "300000"))  # whole app, per day
+USER_DAILY_BUDGET = int(os.getenv("CAREFLOW_USER_TOKEN_BUDGET", "150000"))    # per logged-in user, per day
 PER_PATIENT_DAILY_BUDGET = int(os.getenv("CAREFLOW_PATIENT_TOKEN_BUDGET", "120000"))
 MAX_OUTPUT_TOKENS = 2500
 MAX_AGENT_STEPS = 5  # tool-calling loop cap for the Q&A agent
@@ -65,6 +66,27 @@ IMAGE_JPEG_QUALITY = 80
 
 # Mock mode: lets the UI and tests run without an API key (canned model replies).
 MOCK = os.getenv("CAREFLOW_MOCK", "0") == "1"
+
+# --- Login security -----------------------------------------------------------
+PBKDF2_ITERATIONS = int(os.getenv("CAREFLOW_PBKDF2_ITERATIONS", "600000"))  # OWASP 2023 for PBKDF2-SHA256
+SESSION_IDLE_MINUTES = 30        # signed out after 30 min without activity
+SESSION_MAX_HOURS = 12           # and after one shift at most
+MAX_FAILED_LOGINS = 5            # then the account is locked ...
+LOCKOUT_MINUTES = 15             # ... for this long
+MIN_PASSWORD_LENGTH = 10
+COOKIE_SECURE = os.getenv("CAREFLOW_HTTPS", "0") == "1"  # set when served over HTTPS
+
+# --- Email reminders ----------------------------------------------------------
+# Reminders are only ever sent after a consultant authorises them. Without SMTP settings
+# they are written to data/outbox/ as .eml files (nothing leaves the computer).
+OUTBOX = DATA / "outbox"
+SMTP_HOST = os.getenv("CAREFLOW_SMTP_HOST")
+SMTP_PORT = int(os.getenv("CAREFLOW_SMTP_PORT", "587"))
+SMTP_USER = os.getenv("CAREFLOW_SMTP_USER")
+SMTP_PASSWORD = os.getenv("CAREFLOW_SMTP_PASSWORD")
+HOSPITAL_NAME = os.getenv("CAREFLOW_HOSPITAL_NAME", "CareFlow Demo Nursing Home")
+HOSPITAL_EMAIL = os.getenv("CAREFLOW_HOSPITAL_EMAIL", "reminders@careflow-demo.invalid")
+HOSPITAL_PHONE = os.getenv("CAREFLOW_HOSPITAL_PHONE", "+91-00000-00000 (demo)")
 
 
 def api_key() -> str | None:

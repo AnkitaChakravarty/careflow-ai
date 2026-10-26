@@ -1,25 +1,25 @@
-"""CareFlow AI - obstetric ward assistant (prototype, synthetic data only).
+"""CareFlow AI - obstetric & newborn ward assistant (prototype, synthetic data only).
 
-Run:   python app.py        then open http://127.0.0.1:8050
+Run:   python app.py        then open http://127.0.0.1:8050 and sign in (demo accounts in README).
 Uses only the Python standard library for the web server (no web framework to install).
 """
 from __future__ import annotations
 
 import email
 import email.policy
-import html
 import json
 import re
 import sys
 import threading
+import time
 import traceback
-import uuid
 import webbrowser
+from datetime import datetime
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
-from careflow import config, db, drafts, events, extract, llm, qa, record, rules
+from careflow import (auth, config, db, discharge, drafts, events, extract, intake, llm, qa, reminders, views)
 
 if config.MOCK:
     from careflow import mock
@@ -27,401 +27,83 @@ if config.MOCK:
 
 CONN = db.connect()
 db.init(CONN)
-LOCK = threading.Lock()  # one writer at a time (SQLite + small ward)
-ROLES = ["Resident doctor", "Nurse", "Consultant"]
-e = html.escape
+views.CONN = CONN
+LOCK = threading.RLock()  # one writer at a time (SQLite + small ward)
+STATIC = {"/static/style.css": "text/css; charset=utf-8", "/static/app.js": "text/javascript; charset=utf-8"}
+CSP = ("default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; form-action 'self'; "
+       "frame-ancestors 'none'; base-uri 'none'; object-src 'none'")
+FAILED_BY_IP: dict[str, list[float]] = {}
+VACCINE_ROUTE = {"BCG": ("0.05 ml", "ID"), "OPV0": ("2 drops", "oral"), "HEPB1": ("0.5 ml", "IM"), "VITK": ("1 mg", "IM")}
 
 
-# --------------------------------------------------------------------------- helpers
-def badge(text, kind="grey"):
-    return f'<span class="badge b-{kind}">{e(str(text))}</span>'
+class Forbidden(Exception):
+    pass
 
 
-def conf_badge(c):
-    return badge(c or "low", {"high": "green", "medium": "yellow", "low": "red"}.get(c, "red"))
+def _ip_blocked(ip: str) -> bool:
+    now = time.time()
+    FAILED_BY_IP[ip] = [t for t in FAILED_BY_IP.get(ip, []) if now - t < 900]
+    return len(FAILED_BY_IP[ip]) >= 20
 
 
-def cite_html(text: str, unsupported: list | None = None) -> str:
-    out = e(text)
-    out = re.sub(r"\[([A-Z]\d+(?:\.p[\d?]+)?)\]", r'<span class="cite">\1</span>', out)
-    for n in unsupported or []:
-        out = re.sub(rf"(?<![\d.]){re.escape(n)}(?![\d.])", f'<span class="unsup" title="Number not found in record">{n}</span>', out)
-    return out
-
-
-def money(x):
-    return f"₹{x:,.0f}"
-
-
-def fmt_vitals(d: dict) -> str:
-    parts = []
-    if d.get("sbp") or d.get("dbp"):
-        parts.append(f"BP {d.get('sbp', '?')}/{d.get('dbp', '?')}")
-    for k, lab in (("hr", "HR"), ("rr", "RR"), ("spo2", "SpO2"), ("fhr", "FHR")):
-        if d.get(k) not in (None, ""):
-            parts.append(f"{lab} {d[k]}")
-    if d.get("temp_c") not in (None, ""):
-        parts.append(f"T {d['temp_c']}°C")
-    if d.get("temp_f") not in (None, ""):
-        parts.append(f"T {d['temp_f']}°F")
-    if d.get("avpu"):
-        parts.append(f"AVPU {d['avpu']}")
-    return ", ".join(parts)
-
-
-def event_text(r) -> str:
-    d = json.loads(r["data"])
-    t = r["type"]
-    if t == "vitals":
-        extra = f" <small>(scanned note p{d.get('page')}: “{e(str(d.get('verbatim') or ''))}”)</small>" if r["source"] == "document" else ""
-        return e(fmt_vitals(d)) + extra
-    if t == "med_admin":
-        return e(f"{d.get('name')} × {d.get('qty')} {d.get('unit', '')} — {d.get('dose', '')} {d.get('route', '')}".strip())
-    if t == "service":
-        return e(f"{d.get('name')} × {d.get('qty')}")
-    return e(d.get("text", ""))
-
-
-def page(title: str, body: str, role: str, msg: str = "", err: str = "") -> bytes:
-    pending = CONN.execute("SELECT COUNT(*) FROM alerts WHERE status='pending'").fetchone()[0]
-    opts = "".join(f'<option {"selected" if r == role else ""}>{e(r)}</option>' for r in ROLES)
-    flash = (f'<div class="msg ok">{e(msg)}</div>' if msg else "") + (f'<div class="msg err">{e(err)}</div>' if err else "")
-    mock = ' <span class="badge b-yellow">MOCK MODE – canned AI replies</span>' if config.MOCK else ""
-    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{e(title)} · CareFlow AI</title><link rel="stylesheet" href="/static/style.css"></head><body>
-<header><a class="logo" href="/">Care<span>Flow</span> AI</a>
-<nav><a href="/">Ward</a><a href="/alerts">Consultant alerts {badge(pending, 'red') if pending else ''}</a><a href="/inventory">Inventory</a>
-<a href="/usage">AI usage &amp; cost</a><a href="/rules">Red-flag rules</a><a href="/audit">Audit log</a></nav>
-<form class="who" method="post" action="/role">Acting as <select name="role" onchange="this.form.submit()">{opts}</select></form></header>
-<div class="banner">Prototype for demonstration with <b>synthetic patients only</b>. Not a medical device; red-flag thresholds are demo values. All AI output must be checked by a clinician.{mock}</div>
-<main>{flash}{body}</main><footer>CareFlow AI · model {config.MODEL} via Portkey · MGT 409 final project</footer>
-<script>document.querySelectorAll('form[data-busy]').forEach(f=>f.addEventListener('submit',()=>{{f.classList.add('busy');
-f.querySelectorAll('button').forEach(b=>b.disabled=true);}}));</script></body></html>""".encode("utf-8")
-
-
-# --------------------------------------------------------------------------- views
-def view_ward(role, msg="", err=""):
-    cards = []
-    for p in CONN.execute("SELECT * FROM patients WHERE status='admitted' ORDER BY CAST(bed AS INTEGER)"):
-        pend = CONN.execute("SELECT level FROM alerts WHERE patient_id=? AND status='pending' ORDER BY id DESC", (p["id"],)).fetchall()
-        v = CONN.execute("SELECT * FROM events WHERE patient_id=? AND type='vitals' ORDER BY ts DESC, id DESC LIMIT 1", (p["id"],)).fetchone()
-        tag = badge(f"{len(pend)} alert{'s' if len(pend) > 1 else ''} pending", "red" if any(a["level"] == "red" for a in pend) else "yellow") if pend else badge("no pending alerts", "green")
-        last = f"<div class='muted' style='font-size:13px;margin-top:6px'>Last obs {e(v['ts'][5:16])}: {e(fmt_vitals(json.loads(v['data'])))}</div>" if v else ""
-        cards.append(f"""<a class="pcard" href="/patient/{p['id']}"><div class="bed">Bed {e(p['bed'])} · {e(p['uhid'])} · {e(p['consultant'])}</div>
-<div class="name">{e(p['name'])}, {p['age']}</div><div style="font-size:14px">{e(p['admitting_diagnosis'])}</div>
-<div style="margin-top:8px">{tag}</div>{last}</a>""")
-    used = llm.tokens_today(CONN)
-    cost = CONN.execute("SELECT COALESCE(SUM(cost_usd),0) FROM usage WHERE substr(ts,1,10)=date('now','localtime')").fetchone()[0]
-    low = CONN.execute("SELECT COUNT(*) FROM inventory WHERE stock<=reorder_level").fetchone()[0]
-    return page("Ward", f"""<h1>Obstetric ward</h1><p class="sub">Pick a patient to read their notes, record bedside observations, see alerts, ask questions and draft handover or discharge documents.</p>
-<div class="metrics"><div class="metric"><div class="v">{CONN.execute("SELECT COUNT(*) FROM patients WHERE status='admitted'").fetchone()[0]}</div><div class="l">patients admitted</div></div>
-<div class="metric"><div class="v">{CONN.execute("SELECT COUNT(*) FROM alerts WHERE status='pending'").fetchone()[0]}</div><div class="l">alerts awaiting consultant</div></div>
-<div class="metric"><div class="v">{used:,}</div><div class="l">AI tokens today (budget {config.DAILY_TOKEN_BUDGET:,})</div></div>
-<div class="metric"><div class="v">${cost:.4f}</div><div class="l">AI cost today</div></div>
-<div class="metric"><div class="v">{low}</div><div class="l">medicines at/below reorder level</div></div></div>
-<div class="grid">{''.join(cards)}</div>""", role, msg, err)
-
-
-def view_patient(pid: int, role: str, msg="", err="", qa_result=None):
-    p = CONN.execute("SELECT * FROM patients WHERE id=?", (pid,)).fetchone()
-    if not p:
-        return None
-    key = uuid.uuid4().hex
-    parts = [f"""<p><a href="/">← Ward</a></p><h1>{e(p['name'])}, {p['age']}</h1>
-<p class="sub">Bed {e(p['bed'])} · {e(p['uhid'])} · Consultant {e(p['consultant'])} · Admitted {e(p['admitted_at'])}<br>
-<b>Admitting diagnosis:</b> {e(p['admitting_diagnosis'])}</p>
-<div class="tabs"><a href="#docs">1 · Scanned notes</a><a href="#bedside">2 · Bedside entry</a><a href="#alerts">3 · Alerts</a>
-<a href="#timeline">Timeline</a><a href="#ask">4 · Ask the record</a><a href="#drafts">5 · Handover / discharge</a><a href="#bill">6 · Bill</a></div>"""]
-
-    # ---- 1. documents & extraction
-    docs = CONN.execute("SELECT * FROM documents WHERE patient_id=? ORDER BY id DESC", (pid,)).fetchall()
-    exts = {x["document_id"]: x for x in extract.latest(CONN, pid)}
-    doc_rows = []
-    for d in docs:
-        x = exts.get(d["id"])
-        status = (badge("read" + (" (reused, no AI cost)" if x["cached_from"] else ""), "green") if x else
-                  f"""<form method="post" action="/patient/{pid}/extract" data-busy class="inline"><input type="hidden" name="document_id" value="{d['id']}">
-<button class="small">Read with AI</button><span class="spinner">Reading handwriting… up to a minute</span></form>""")
-        doc_rows.append(f"<tr><td>D{d['id']}</td><td>{e(d['filename'])}</td><td>{d['pages']}</td><td>{e(d['uploaded_at'])}</td><td>{status}</td></tr>")
-    parts.append(f"""<section class="card" id="docs"><h2>1 · Scanned notes → structured record</h2>
-<p class="muted">Upload OPD notes, progress notes or reports (PDF/JPG/PNG, ≤{config.MAX_PAGES} pages). The Record Reader agent transcribes them;
-every field shows its source page and how sure it was. Fields marked for review need a clinician's check.</p>
-<div class="two"><form method="post" action="/patient/{pid}/upload" enctype="multipart/form-data">
-<label>Upload a scanned note</label><input type="file" name="file" accept=".pdf,.jpg,.jpeg,.png" required>
-<div style="margin-top:8px"><button>Upload</button></div></form>
-<form method="post" action="/patient/{pid}/sample"><label>No file handy? Attach a synthetic sample</label>
-<select name="which"><option value="meera_sharma_opd_and_progress_note.pdf">Handwritten OPD + progress note (Meera Sharma)</option>
-<option value="injection_test_nursing_note.png">Safety test: nursing note containing a prompt-injection attack</option></select>
-<div style="margin-top:8px"><button class="secondary">Attach sample</button></div></form></div>
-{'<table style="margin-top:12px"><tr><th>ID</th><th>File</th><th>Pages</th><th>Uploaded</th><th>Status</th></tr>' + ''.join(doc_rows) + '</table>' if doc_rows else ''}""")
-    for x in extract.latest(CONN, pid):
-        parts.append(render_extraction(pid, x))
-    parts.append("</section>")
-
-    # ---- 2. bedside entry
-    inv = CONN.execute("SELECT * FROM inventory ORDER BY name").fetchall()
-    tar = CONN.execute("SELECT * FROM tariff WHERE code<>'ROOM_GEN' ORDER BY name").fetchall()
-    inv_opts = "".join(f'<option value="{e(i["item_code"])}">{e(i["name"])} (stock {i["stock"]}, {money(i["unit_price"])}/{e(i["unit"])})</option>' for i in inv)
-    tar_opts = "".join(f'<option value="{e(t["code"])}">{e(t["name"])} – {money(t["price"])}</option>' for t in tar)
-    parts.append(f"""<section class="card" id="bedside"><h2>2 · Bedside entry <small>(nurse / resident)</small></h2>
-<div class="two"><form method="post" action="/patient/{pid}/event"><input type="hidden" name="type" value="vitals"><input type="hidden" name="key" value="v-{key}">
-<h3>Observations</h3><div class="row"><div><label>Systolic BP</label><input name="sbp" type="number"></div><div><label>Diastolic BP</label><input name="dbp" type="number"></div>
-<div><label>Pulse /min</label><input name="hr" type="number"></div><div><label>Resp. rate</label><input name="rr" type="number"></div></div>
-<div class="row"><div><label>Temp °C</label><input name="temp_c" type="number" step="0.1"></div><div><label>SpO2 %</label><input name="spo2" type="number"></div>
-<div><label>Fetal HR</label><input name="fhr" type="number"></div><div><label>AVPU</label><select name="avpu"><option value="alert">Alert</option><option value="voice">Voice</option><option value="pain">Pain</option><option value="unresponsive">Unresponsive</option></select></div></div>
-<button>Save observations</button> <small>Checked instantly against the red-flag rules.</small></form>
-<div><form method="post" action="/patient/{pid}/event"><input type="hidden" name="type" value="med_admin"><input type="hidden" name="key" value="m-{key}">
-<h3>Medicine given</h3><div class="row"><div style="grid-column:span 2"><label>Medicine (from pharmacy stock)</label><select name="item_code">{inv_opts}</select></div></div>
-<div class="row"><div><label>Units</label><input name="qty" type="number" value="1" min="1"></div><div><label>Dose</label><input name="dose" placeholder="e.g. 100 mg"></div>
-<div><label>Route</label><select name="route"><option>oral</option><option>IV</option><option>IM</option><option>SC</option><option>PV</option></select></div></div>
-<button>Record administration</button> <small>Deducts stock and adds to bill once.</small></form>
-<form method="post" action="/patient/{pid}/event" style="margin-top:14px"><input type="hidden" name="type" value="service"><input type="hidden" name="key" value="s-{key}">
-<h3>Service / investigation</h3><div class="row"><div style="grid-column:span 2"><select name="code">{tar_opts}</select></div><div><input name="qty" type="number" value="1" min="1"></div></div>
-<button class="secondary">Add service</button></form>
-<form method="post" action="/patient/{pid}/event" style="margin-top:14px"><input type="hidden" name="type" value="note"><input type="hidden" name="key" value="n-{key}">
-<h3>Clinical note / discharge instruction</h3><textarea name="text" placeholder="e.g. Review by consultant: continue labetalol 200 mg BD. Plan discharge day 3, follow-up OPD 1 week."></textarea>
-<button class="secondary" style="margin-top:6px">Add note</button></form></div></div></section>""")
-
-    # ---- 3. alerts
-    al = CONN.execute("SELECT * FROM alerts WHERE patient_id=? ORDER BY ts DESC, id DESC", (pid,)).fetchall()
-    parts.append(f'<section class="card" id="alerts"><h2>3 · Red-flag alerts → consultant</h2>'
-                 + ("".join(render_alert(a, role) for a in al) or "<p class='muted'>No alerts.</p>") + "</section>")
-
-    # ---- timeline
-    rows = []
-    for r in CONN.execute("SELECT * FROM events WHERE patient_id=? ORDER BY ts DESC, id DESC", (pid,)):
-        src = badge("from scanned note (AI)", "blue") if r["source"] == "document" else badge(r["source"], "grey")
-        rows.append(f"<tr><td class='mono'>E{r['id']}</td><td>{e(r['ts'])}</td><td>{e(r['type'])}</td><td>{event_text(r)}</td><td>{e(r['entered_by'] or '')} {src}</td></tr>")
-    parts.append(f"""<section class="card" id="timeline"><h2>Timeline</h2><table><tr><th>ID</th><th>Time</th><th>Type</th><th>Detail</th><th>By / source</th></tr>{''.join(rows)}</table></section>""")
-
-    # ---- 4. ask
-    ans = ""
-    if qa_result:
-        chk = qa_result["check"]
-        flags = []
-        if chk["invalid"]:
-            flags.append(f'<div class="danger-box">Citations not found in this record: {e(", ".join(chk["invalid"]))} – treat those statements as unreliable.</div>')
-        if not chk["has_citations"]:
-            flags.append('<div class="warn">This answer contains no citations. Verify before relying on it.</div>')
-        trace = " → ".join(f"{t['tool']}({', '.join(f'{k}={v}' for k, v in t['args'].items())})" for t in qa_result["trace"]) or "no tools"
-        ans = f"""<h3>Q: {e(qa_result['question'])}</h3><div class="answer">{cite_html(qa_result['answer'])}</div>{''.join(flags)}
-<p class="muted" style="font-size:13px">Agent steps: {qa_result['steps']} · tools used: {e(trace)}</p>"""
-    parts.append(f"""<section class="card" id="ask"><h2>4 · Ask the record</h2>
-<p class="muted">Answers come only from this patient's record, with citations: <span class="cite">E12</span> bedside event, <span class="cite">D2.p1</span> scanned document page, <span class="cite">A3</span> alert.</p>
-<form method="post" action="/patient/{pid}/ask" data-busy><div class="row"><div style="grid-column:span 5"><input name="q" required placeholder="e.g. What is the BP trend and has the consultant seen the alert? Any allergies?"></div>
-<div><button>Ask</button><span class="spinner">Thinking…</span></div></div></form>
-<p class="muted" style="font-size:13px">Try: “Any drug allergies?” · “Summarise BP since admission” · “What medicines has she actually received?” · “Is pre-eclampsia confirmed?”</p>{ans}</section>""")
-
-    # ---- 5. drafts
-    dr = CONN.execute("SELECT * FROM drafts WHERE patient_id=? ORDER BY id DESC LIMIT 4", (pid,)).fetchall()
-    parts.append(f"""<section class="card" id="drafts"><h2>5 · Handover &amp; discharge drafts</h2>
-<p class="muted">The Summary Writer drafts from the accumulated record. A grounding check then verifies every citation and number against the record. Nothing is final until a clinician approves it.</p>
-<form method="post" action="/patient/{pid}/draft" data-busy class="inline"><input type="hidden" name="kind" value="handover"><button>Draft shift handover</button></form>
-<form method="post" action="/patient/{pid}/draft" data-busy class="inline"><input type="hidden" name="kind" value="discharge"><button class="secondary">Draft discharge summary</button><span class="spinner">Drafting…</span></form>
-{''.join(render_draft(d) for d in dr)}</section>""")
-
-    # ---- 6. bill
-    b = events.bill(CONN, pid)
-    lines = "".join(f"<tr><td>{e(l['ts'][:16])}</td><td>{e(l['description'])}</td><td class='num'>{l['qty']:g}</td><td class='num'>{money(l['unit_price'])}</td>"
-                    f"<td class='num'>{money(l['amount'])}</td><td class='mono'>{'E' + str(l['event_id']) if l['event_id'] else 'room'}</td></tr>" for l in b["lines"])
-    parts.append(f"""<section class="card" id="bill"><h2>6 · Running bill (INR)</h2><p class="muted">Calculated by fixed rules from recorded services and administered medicines only – a medicine merely mentioned in a note is never billed.</p>
-<table><tr><th>Date</th><th>Item</th><th class="num">Qty</th><th class="num">Rate</th><th class="num">Amount</th><th>Source</th></tr>{lines}
-<tr><th colspan="4">Total</th><th class="num">{money(b['total'])}</th><th></th></tr></table></section>""")
-    return page(p["name"], "".join(parts), role, msg, err)
-
-
-def render_extraction(pid, x):
-    d = x["data"]
-    reviews = {r["field_key"]: r for r in CONN.execute("SELECT * FROM field_reviews WHERE extraction_id=? ORDER BY id", (x["id"],))}
-    total, review = extract.review_count(d)
-    rows = []
-
-    def row(label, key, f):
-        if not f:
-            return
-        rv = reviews.get(key)
-        extra = " · ".join(f"{k}: {f[k]}" for k in ("certainty", "dose", "frequency", "route", "status", "result", "date") if f.get(k))
-        value = e(f["value"]) + (f"<div class='muted' style='font-size:12px'>{e(extra)}</div>" if extra else "")
-        if rv:
-            state = badge(f"{rv['status']} by {rv['reviewer']}", "green" if rv["status"] == "confirmed" else "blue")
-            if rv["corrected_value"]:
-                value = f"<s class='muted'>{e(f['value'])}</s> {e(rv['corrected_value'])}"
-        elif f.get("needs_review"):
-            state = f"""{badge('needs review', 'yellow')}<form method="post" action="/patient/{pid}/review" class="inline">
-<input type="hidden" name="extraction_id" value="{x['id']}"><input type="hidden" name="field_key" value="{e(key)}">
-<input name="corrected" placeholder="correction (optional)" style="width:150px;padding:3px 6px;font-size:12px"> <button class="small secondary">Confirm</button></form>"""
-        else:
-            state = badge("ok", "green")
-        rows.append(f"<tr><td>{e(label)}</td><td>{value}</td><td class='mono'>“{e(f.get('verbatim') or '')}”</td>"
-                    f"<td>{'p' + str(f['page']) if f.get('page') else '<b>?</b>'}</td><td>{conf_badge(f.get('confidence'))}</td><td>{state}</td></tr>")
-
-    for k, f in d["patient"].items():
-        row(f"Patient · {k}", f"patient.{k}", f)
-    for k, f in d["obstetric"].items():
-        row(f"Obstetric · {k.replace('_', ' ')}", f"obstetric.{k}", f)
-    for sec in extract.FIELD_LISTS:
-        for i, f in enumerate(d[sec]):
-            row(sec.replace("_", " ").capitalize(), f"{sec}.{i}", f)
-    row("Clinician", "clinician", d.get("clinician"))
-    vit = "".join(f"<li>{e(v.get('datetime') or 'time not written')}: {e(fmt_vitals({**v, 'temp_f' if (v.get('temp') or 0) > 45 else 'temp_c': v.get('temp')}))} "
-                  f"<small>(p{v.get('page')}, {e(v.get('confidence'))})</small></li>" for v in d["vitals"])
-    warn = ""
-    if d.get("embedded_instructions"):
-        items = "".join(f"<li>p{e(str(i.get('page')))}: “{e(str(i.get('text'))[:200])}”</li>" for i in d["embedded_instructions"])
-        warn = (f'<div class="danger-box"><b>Instructions found inside the document were ignored (possible prompt injection).</b>'
-                f'<ul>{items}</ul>No action was taken; the AI has no ability to change bills, alerts or discharge status.</div>')
-    ill = ""
-    if d.get("illegible"):
-        ill = '<div class="warn"><b>Could not read:</b><ul>' + "".join(f"<li>p{e(str(i.get('page')))}: {e(str(i.get('description')))}</li>" for i in d["illegible"]) + "</ul></div>"
-    probs = f'<div class="warn">Validation: {e("; ".join(d["validation_problems"]))}</div>' if d.get("validation_problems") else ""
-    return f"""<h3 style="margin-top:20px">Extracted from D{x['document_id']} · {e(x['filename'])} <small class="muted">({total} fields, {review} need review)</small></h3>
-{warn}{ill}{probs}<table><tr><th>Field</th><th>Value</th><th>As written</th><th>Page</th><th>Confidence</th><th>Review</th></tr>{''.join(rows)}</table>
-{'<h3>Vital signs found in the note</h3><ul>' + vit + '</ul><p class="muted" style="font-size:13px">These were sent through the same red-flag rules as bedside entries (see Alerts).</p>' if vit else ''}"""
-
-
-def render_alert(a, role):
-    reasons = json.loads(a["reasons"])
-    cls = "alert" + (" yellow" if a["level"] == "yellow" else "") + (" ack" if a["status"] != "pending" else "")
-    p = CONN.execute("SELECT name, bed FROM patients WHERE id=?", (a["patient_id"],)).fetchone()
-    if a["status"] == "pending":
-        if role == "Consultant":
-            action = (f'<form method="post" action="/alerts/{a["id"]}/ack" class="inline" style="float:right">'
-                      f'<input type="hidden" name="back" value="/patient/{a["patient_id"]}#alerts"><button class="small">Acknowledge</button></form>')
-        else:
-            action = '<span style="float:right">' + badge("pending consultant review", "red") + "</span>"
-    else:
-        action = '<span style="float:right">' + badge(f"acknowledged by {a['acknowledged_by']} at {a['acknowledged_at'][11:16]}", "green") + "</span>"
-    src = " · " + badge("from scanned note – verify", "blue") if a["source"] == "document" else ""
-    return f"""<div class="{cls}">{action}<b>{e(a['level'].upper())} · A{a['id']}</b> · {e(a['ts'])} · <a href="/patient/{a['patient_id']}">{e(p['name'])}, bed {e(p['bed'])}</a>{src}
-<div style="font-size:14px;margin-top:4px">{'<br>'.join(e(r) for r in reasons)}</div><div class="muted" style="font-size:12px">Score {e(a['score'] or '')} · triggered by E{a['event_id']}</div></div>"""
-
-
-def render_draft(d):
-    sections = json.loads(d["content"])
-    g = json.loads(d["grounding"])
-    title = drafts.KINDS[d["kind"]]["title"]
-    ok = badge("grounding check passed", "green") if g["passed"] else badge("grounding check: issues", "red")
-    issues = ""
-    if g["unsupported_numbers"]:
-        issues += f'<div class="danger-box">Numbers not found anywhere in the record (highlighted): {e(", ".join(g["unsupported_numbers"]))}. Check before use.</div>'
-    if g["invalid_citations"]:
-        issues += f'<div class="danger-box">Invalid citations: {e(", ".join(g["invalid_citations"]))}</div>'
-    if g["sections_without_citations"]:
-        issues += f'<div class="warn">Sections without citations: {e(", ".join(g["sections_without_citations"]))}</div>'
-    body = "".join(f"<h4>{e(s['heading'])}</h4><div>{cite_html(s['text'], g['unsupported_numbers'])}</div>" for s in sections)
-    if d["status"] == "approved":
-        state = badge(f"APPROVED by {d['approved_by']} · {d['approved_at']}", "green")
-    else:
-        state = (badge("DRAFT – not for use until approved", "yellow") +
-                 f"""<form method="post" action="/drafts/{d['id']}/approve" class="inline" style="margin-left:8px"><input name="clinician" required placeholder="Approving clinician name" style="width:220px;padding:4px 8px">
-<input type="hidden" name="back" value="/patient/{d['patient_id']}#drafts"> <button class="small">Approve</button></form>""")
-    return f"""<div class="draft" style="margin-top:14px"><b>{e(title)}</b> · D-{d['id']} · {e(d['created_at'])} · {ok}<div style="margin:6px 0">{state}</div>{issues}{body}</div>"""
-
-
-def view_alerts(role):
-    pend = CONN.execute("SELECT * FROM alerts WHERE status='pending' ORDER BY CASE level WHEN 'red' THEN 0 ELSE 1 END, ts DESC").fetchall()
-    done = CONN.execute("SELECT * FROM alerts WHERE status<>'pending' ORDER BY acknowledged_at DESC LIMIT 20").fetchall()
-    hint = "" if role == "Consultant" else '<div class="warn">Switch “Acting as” to <b>Consultant</b> (top right) to acknowledge alerts.</div>'
-    return page("Consultant alerts", f"""<h1>Consultant alerts</h1><p class="sub">Raised automatically by fixed rules (not by AI) whenever observations cross the MEOWS-based thresholds.</p>{hint}
-<h2>Pending ({len(pend)})</h2>{''.join(render_alert(a, role) for a in pend) or '<p class="muted">None pending.</p>'}
-<h2 style="margin-top:20px">Recently acknowledged</h2>{''.join(render_alert(a, role) for a in done) or '<p class="muted">None.</p>'}""", role)
-
-
-def view_inventory(role):
-    rows = "".join(f"<tr><td class='mono'>{e(i['item_code'])}</td><td>{e(i['name'])}</td><td class='num'>{i['stock']} {e(i['unit'])}</td><td class='num'>{i['reorder_level']}</td>"
-                   f"<td class='num'>{money(i['unit_price'])}</td><td>{badge('reorder', 'red') if i['stock'] <= i['reorder_level'] else badge('ok', 'green')}</td></tr>"
-                   for i in CONN.execute("SELECT * FROM inventory ORDER BY name"))
-    led = "".join(f"<tr><td>{e(r['ts'])}</td><td class='mono'>{e(r['item_code'])}</td><td class='num'>{r['delta']}</td><td class='mono'>E{r['event_id']}</td><td>{e(r['reason'])}</td></tr>"
-                  for r in CONN.execute("SELECT * FROM stock_ledger ORDER BY id DESC LIMIT 40"))
-    return page("Inventory", f"""<h1>Pharmacy stock (simulated)</h1><p class="sub">Stock moves only when a nurse records an administration. Each event can move stock once (database-enforced).</p>
-<div class="card"><table><tr><th>Code</th><th>Medicine</th><th class="num">In stock</th><th class="num">Reorder at</th><th class="num">Price</th><th></th></tr>{rows}</table></div>
-<div class="card"><h2>Stock ledger</h2><table><tr><th>Time</th><th>Item</th><th class="num">Change</th><th>Event</th><th>Reason</th></tr>{led}</table></div>""", role)
-
-
-def view_usage(role):
-    by = CONN.execute("""SELECT feature, COUNT(*) n, SUM(input_tokens) i, SUM(cached_tokens) c, SUM(output_tokens) o, SUM(cost_usd) cost,
-        AVG(latency_s) lat, SUM(CASE WHEN note='mock' THEN 1 ELSE 0 END) mocks FROM usage WHERE ok=1 GROUP BY feature ORDER BY feature""").fetchall()
-    rows = "".join(f"<tr><td>{e(r['feature'])}</td><td class='num'>{r['n']}</td><td class='num'>{r['i']:,}</td><td class='num'>{r['c']:,}</td><td class='num'>{r['o']:,}</td>"
-                   f"<td class='num'>{(r['i'] + r['o']) // r['n']:,}</td><td class='num'>${r['cost']:.5f}</td><td class='num'>{r['lat']:.1f}s</td><td>{badge('mock', 'yellow') if r['mocks'] else ''}</td></tr>" for r in by)
-    recent = "".join(f"<tr><td>{e(r['ts'])}</td><td>{e(r['feature'])}</td><td>{r['patient_id'] or ''}</td><td class='num'>{r['input_tokens']:,}</td><td class='num'>{r['cached_tokens']:,}</td>"
-                     f"<td class='num'>{r['output_tokens']:,}</td><td class='num'>${r['cost_usd']:.5f}</td><td>{badge('ok', 'green') if r['ok'] else badge('failed', 'red')} {e(r['note'] or '')}</td></tr>"
-                     for r in CONN.execute("SELECT * FROM usage ORDER BY id DESC LIMIT 40"))
-    return page("AI usage", f"""<h1>AI usage &amp; cost</h1><p class="sub">Every model call is logged with real token counts returned by the API. Prices: ${config.PRICE_INPUT}/M input, ${config.PRICE_CACHED_INPUT}/M cached input, ${config.PRICE_OUTPUT}/M output ({config.MODEL}).</p>
-<div class="metrics"><div class="metric"><div class="v">{llm.tokens_today(CONN):,}</div><div class="l">tokens today</div></div><div class="metric"><div class="v">{config.DAILY_TOKEN_BUDGET:,}</div><div class="l">daily budget (whole app)</div></div>
-<div class="metric"><div class="v">{config.PER_PATIENT_DAILY_BUDGET:,}</div><div class="l">daily budget per patient</div></div><div class="metric"><div class="v">{config.MAX_AGENT_STEPS}</div><div class="l">max tool rounds per question</div></div></div>
-<div class="card"><h2>By feature</h2><table><tr><th>Feature</th><th class="num">Calls</th><th class="num">Input</th><th class="num">Cached input</th><th class="num">Output</th><th class="num">Avg tokens/call</th><th class="num">Cost</th><th class="num">Avg latency</th><th></th></tr>{rows}</table></div>
-<div class="card"><h2>Recent calls</h2><table><tr><th>Time</th><th>Feature</th><th>Patient</th><th class="num">Input</th><th class="num">Cached</th><th class="num">Output</th><th class="num">Cost</th><th>Status</th></tr>{recent}</table></div>""", role)
-
-
-def view_rules(role):
-    rows = "".join(f"<tr><td>{e(a)}</td><td>{badge(b, 'red')}</td><td>{badge(c, 'yellow') if c != '—' else '—'}</td></tr>" for a, b, c in rules.THRESHOLD_TABLE)
-    return page("Red-flag rules", f"""<h1>Red-flag rules</h1><p class="sub">Deterministic code, not AI. An alert is raised for <b>any one red</b> value or <b>two or more yellow</b> values in one set of observations.</p>
-<div class="card"><table><tr><th>Parameter</th><th>Red</th><th>Yellow</th></tr>{rows}</table>
-<p class="muted" style="font-size:13px">Based on the Modified Early Obstetric Warning Score (Singh et al., <i>Anaesthesia</i> 2012) and FIGO fetal heart rate guidance. Demo thresholds – each hospital must set and validate its own.</p></div>""", role)
-
-
-def view_audit(role):
-    rows = "".join(f"<tr><td>{e(r['ts'])}</td><td>{e(r['actor'])}</td><td>{e(r['action'])}</td><td class='mono'>{e(r['detail'][:160])}</td></tr>"
-                   for r in CONN.execute("SELECT * FROM audit ORDER BY id DESC LIMIT 100"))
-    return page("Audit", f"<h1>Audit log</h1><p class='sub'>Who did what, when.</p><div class='card'><table><tr><th>Time</th><th>Actor</th><th>Action</th><th>Detail</th></tr>{rows}</table></div>", role)
-
-
-# --------------------------------------------------------------------------- HTTP
 class Handler(BaseHTTPRequestHandler):
-    server_version = "CareFlow/1.0"
+    server_version = "CareFlow/2.0"
+    sys_version = ""
 
-    def log_message(self, fmt, *args):  # quieter console
-        sys.stderr.write("  %s %s\n" % (self.command, self.path))
+    def log_message(self, fmt, *args):  # quieter console; never logs form bodies (passwords)
+        sys.stderr.write("  %s %s\n" % (self.command, self.path.split("?")[0]))
 
+    # ------------------------------------------------------------------ plumbing
     @property
-    def role(self) -> str:
+    def token(self) -> str | None:
         c = cookies.SimpleCookie(self.headers.get("Cookie", ""))
-        r = c["role"].value if "role" in c else ROLES[0]
-        return r if r in ROLES else ROLES[0]
+        return c["cf_session"].value if "cf_session" in c else None
 
-    def send_html(self, body: bytes, status=200):
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
+    def _headers(self, ctype: str, length: int, extra: dict | None = None):
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(length))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("Content-Security-Policy", CSP)
+        self.send_header("Cache-Control", "no-store")
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.end_headers()
+
+    def send_html(self, body: bytes, status=200, user=None):
+        if user:  # every POST form carries the session's CSRF token
+            tok = views.e(user["csrf"])
+            body = re.sub(rb'(<form[^>]*method="post"[^>]*>)', lambda m: m.group(1) + f'<input type="hidden" name="csrf" value="{tok}">'.encode(), body)
+        self.send_response(status)
+        self._headers("text/html; charset=utf-8", len(body))
+        self.wfile.write(body)
+
+    def send_json(self, obj, status=200):
+        body = json.dumps(obj).encode()
+        self.send_response(status)
+        self._headers("application/json", len(body))
         self.wfile.write(body)
 
     def redirect(self, url, msg="", err="", cookie=None):
+        if not url.startswith("/") or url.startswith("//"):
+            url = "/"  # no open redirects
         if msg or err:
             base, _, frag = url.partition("#")
             url = base + ("&" if "?" in base else "?") + (f"msg={quote(msg)}" if msg else f"err={quote(err)}") + (f"#{frag}" if frag else "")
         self.send_response(303)
         self.send_header("Location", url)
+        self.send_header("Cache-Control", "no-store")
         if cookie:
             self.send_header("Set-Cookie", cookie)
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
-    def do_GET(self):
-        u = urlparse(self.path)
-        qs = parse_qs(u.query)
-        msg, err = qs.get("msg", [""])[0], qs.get("err", [""])[0]
-        try:
-            if u.path == "/static/style.css":
-                body = (config.ROOT / "static" / "style.css").read_bytes()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/css")
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            with LOCK:
-                if u.path == "/":
-                    return self.send_html(view_ward(self.role, msg, err))
-                m = re.fullmatch(r"/patient/(\d+)", u.path)
-                if m:
-                    body = view_patient(int(m.group(1)), self.role, msg, err)
-                    return self.send_html(body) if body else self.send_html(page("Not found", "<h1>Patient not found</h1>", self.role), 404)
-                views = {"/alerts": view_alerts, "/inventory": view_inventory, "/usage": view_usage, "/rules": view_rules, "/audit": view_audit}
-                if u.path in views:
-                    return self.send_html(views[u.path](self.role))
-            self.send_html(page("Not found", "<h1>Not found</h1>", self.role), 404)
-        except Exception:  # noqa: BLE001
-            traceback.print_exc()
-            self.send_html(page("Error", "<h1>Something went wrong</h1><p>See the terminal for details.</p>", self.role), 500)
+    def same_origin(self) -> bool:
+        origin = self.headers.get("Origin")
+        if not origin or origin == "null":
+            return origin is None
+        return urlparse(origin).netloc == self.headers.get("Host", "")
 
     def form(self) -> tuple[dict, dict]:
         length = int(self.headers.get("Content-Length") or 0)
@@ -439,130 +121,349 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     fields[name] = (part.get_payload(decode=True) or b"").decode("utf-8", "replace")
             return fields, files
+        if ctype.startswith("application/json"):
+            return json.loads(raw or b"{}"), {}
         return {k: v[0] for k, v in parse_qs(raw.decode("utf-8", "replace")).items()}, {}
 
+    @staticmethod
+    def need(user, perm):
+        if not auth.can(user, perm):
+            raise Forbidden(f"Your role ({auth.ROLES[user['role']]}) is not allowed to do this.")
+
+    # ------------------------------------------------------------------ GET
+    def do_GET(self):
+        u = urlparse(self.path)
+        qs = parse_qs(u.query)
+        msg, err = qs.get("msg", [""])[0][:300], qs.get("err", [""])[0][:300]
+        if u.path in STATIC:
+            body = (config.ROOT / "static" / u.path.rsplit("/", 1)[1]).read_bytes()
+            self.send_response(200)
+            self._headers(STATIC[u.path], len(body))
+            self.wfile.write(body)
+            return
+        try:
+            with LOCK:
+                user = auth.session_user(CONN, self.token)
+                if u.path == "/login":
+                    return self.send_html(views.view_login(err, msg, qs.get("next", ["/"])[0]))
+                if not user:
+                    return self.redirect("/login?next=" + quote(u.path))
+                if user["must_change_pw"] and u.path != "/account":
+                    return self.redirect("/account", err="Please choose your own password first.")
+                body = self.route_get(u.path, user, msg, err)
+            if body is None:
+                return self.send_html(views.page("Not found", "<h1>Not found</h1>", user), 404, user)
+            self.send_html(body, 200, user)
+        except Forbidden as exc:
+            self.send_html(views.page("Not allowed", f"<h1>Not allowed</h1><p>{views.e(str(exc))}</p>", user), 403, user)
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+            self.send_html(views.page("Error", "<h1>Something went wrong</h1><p>See the terminal for details.</p>", None), 500)
+
+    def route_get(self, path, user, msg, err):
+        simple = {"/": (views.view_dashboard, None), "/assistant": (views.view_assistant, "ask_ai"),
+                  "/alerts": (views.view_alerts, "view_clinical"), "/reminders": (views.view_reminders, "draft_reminders"),
+                  "/billing": (views.view_billing, "view_bills"), "/inventory": (views.view_inventory, "view_inventory"),
+                  "/usage": (views.view_usage, "view_usage"), "/rules": (views.view_rules, None), "/audit": (views.view_audit, "view_audit"),
+                  "/account": (views.view_account, None), "/admin/users": (views.view_users, "manage_users"),
+                  "/admit": (views.view_admit, "admit")}
+        if path in simple:
+            fn, perm = simple[path]
+            if perm:
+                self.need(user, perm)
+            return fn(user, msg, err)
+        if m := re.fullmatch(r"/patient/(\d+)", path):
+            self.need(user, "view_clinical")
+            return views.view_patient(int(m.group(1)), user, msg, err)
+        if m := re.fullmatch(r"/bill/(\d+)", path):
+            self.need(user, "view_bills")
+            return views.view_bill_print(int(m.group(1)), user)
+        if m := re.fullmatch(r"/print/(\d+)", path):
+            self.need(user, "view_clinical")
+            return views.view_draft_print(int(m.group(1)), user)
+        return None
+
+    # ------------------------------------------------------------------ POST
     def do_POST(self):
         u = urlparse(self.path)
+        ip = self.client_address[0]
+        if not self.same_origin():
+            return self.redirect("/", err="Request blocked: it came from another website.")
         try:
             f, files = self.form()
-        except ValueError as exc:
+        except (ValueError, json.JSONDecodeError) as exc:
             return self.redirect("/", err=str(exc))
-        actor = self.role
+        if u.path == "/login":
+            return self.post_login(f, ip)
+        with LOCK:
+            user = auth.session_user(CONN, self.token)
+        is_api = u.path.startswith("/api/")
+        if not user:
+            return self.send_json({"error": "Signed out – please sign in again."}, 401) if is_api else self.redirect("/login", err="Please sign in.")
+        sent = self.headers.get("X-CSRF-Token") if is_api else f.get("csrf")
+        if not auth.check_csrf(user, sent):
+            return self.send_json({"error": "Security token missing or expired – reload the page."}, 403) if is_api else \
+                self.redirect("/", err="Security token missing or expired – please try again.")
+        if u.path == "/logout":
+            with LOCK:
+                auth.end_session(CONN, self.token, user["username"])
+            return self.redirect("/login", msg="Signed out.", cookie=auth.cookie_header(None))
+        if user["must_change_pw"] and u.path != "/account/password":
+            return self.redirect("/account", err="Please choose your own password first.")
+        back = f.get("back") or "/"
         try:
-            if u.path == "/role":
-                return self.redirect(self.headers.get("Referer") or "/", cookie=f"role={quote(f.get('role', ROLES[0]))}; Path=/; SameSite=Lax")
-            m = re.fullmatch(r"/alerts/(\d+)/ack", u.path)
-            if m:
-                if actor != "Consultant":
-                    return self.redirect(f.get("back") or "/alerts", err="Only a consultant can acknowledge alerts.")
-                with LOCK:
-                    events.acknowledge_alert(CONN, int(m.group(1)), "Consultant (demo)")
-                return self.redirect(f.get("back") or "/alerts", msg="Alert acknowledged.")
-            m = re.fullmatch(r"/drafts/(\d+)/approve", u.path)
-            if m:
-                name = (f.get("clinician") or "").strip()
-                if actor == "Nurse" or len(name) < 3:
-                    return self.redirect(f.get("back") or "/", err="A doctor must enter their name to approve.")
-                with LOCK:
-                    drafts.approve(CONN, int(m.group(1)), f"{name} ({actor})")
-                return self.redirect(f.get("back") or "/", msg="Draft approved.")
-            m = re.fullmatch(r"/patient/(\d+)/(\w+)", u.path)
-            if not m:
-                return self.redirect("/", err="Unknown action.")
-            pid, action = int(m.group(1)), m.group(2)
-            back = f"/patient/{pid}"
-            if not CONN.execute("SELECT 1 FROM patients WHERE id=?", (pid,)).fetchone():
-                return self.redirect("/", err="Unknown patient.")
-            if action == "event":
-                return self.post_event(pid, f, actor, back)
-            if action in ("upload", "sample"):
-                if action == "sample":
-                    samples = {p.name: p for p in (config.DATA / "samples").iterdir()}  # whitelist, no path traversal
-                    path = samples.get(f.get("which") or "meera_sharma_opd_and_progress_note.pdf")
-                    if not path:
-                        return self.redirect(back + "#docs", err="Unknown sample.")
-                    content, fname = path.read_bytes(), path.name
-                else:
-                    fname, content = files.get("file", ("", b""))
-                    if not content:
-                        return self.redirect(back + "#docs", err="Choose a file first.")
-                with LOCK:
-                    did = extract.add_document(CONN, pid, fname, content, actor)
-                return self.redirect(back + "#docs", msg=f"Uploaded as D{did}. Click “Read with AI”.")
-            if action == "extract":
-                with LOCK:
-                    r = extract.run(CONN, pid, int(f["document_id"]), actor)
-                total, review = extract.review_count(r["data"])
-                note = " (identical file read before – reused, no AI cost)" if r["reused"] else ""
-                inj = " Instructions inside the document were detected and ignored." if r["data"].get("embedded_instructions") else ""
-                return self.redirect(back + "#docs", msg=f"Read {total} fields; {review} need review; {r['vitals_events']} vital-sign sets checked against red-flag rules.{note}{inj}")
-            if action == "review":
-                with LOCK:
-                    corrected = (f.get("corrected") or "").strip()
-                    CONN.execute("INSERT INTO field_reviews (extraction_id, field_key, status, corrected_value, reviewer, reviewed_at) VALUES (?,?,?,?,?,?)",
-                                 (int(f["extraction_id"]), f["field_key"], "corrected" if corrected else "confirmed", corrected or None, actor, db.now()))
-                    db.audit(CONN, actor, "field_reviewed", {"extraction_id": f["extraction_id"], "field": f["field_key"], "corrected": bool(corrected)})
-                    CONN.commit()
-                return self.redirect(back + "#docs", msg="Field reviewed.")
-            if action == "ask":
-                q = (f.get("q") or "").strip()
-                if not q:
-                    return self.redirect(back + "#ask", err="Type a question.")
-                with LOCK:
-                    res = qa.ask(CONN, pid, q)
-                    res["question"] = q
-                    return self.send_html(view_patient(pid, actor, qa_result=res))
-            if action == "draft":
-                kind = f.get("kind")
-                if kind not in drafts.KINDS:
-                    return self.redirect(back, err="Unknown draft type.")
-                with LOCK:
-                    drafts.generate(CONN, pid, kind, actor)
-                return self.redirect(back + "#drafts", msg="Draft created – review the grounding check before approving.")
-            return self.redirect(back, err="Unknown action.")
-        except (llm.BudgetExceeded, llm.ModelUnavailable, events.EventError, ValueError) as exc:
-            target = u.path.rsplit("/", 1)[0] if u.path.startswith("/patient/") else "/"
-            return self.redirect(target, err=str(exc))
+            if is_api:
+                return self.post_api(u.path, f, user)
+            return self.route_post(u.path, f, files, user)
+        except Forbidden as exc:
+            return self.redirect(back, err=str(exc))
+        except (auth.AuthError, intake.IntakeError, discharge.DischargeError, events.EventError, llm.BudgetExceeded,
+                llm.ModelUnavailable, ValueError) as exc:
+            target = re.match(r"/patient/\d+", u.path)
+            return self.redirect((target.group(0) + "#" + (f.get("anchor") or "")) if target else
+                                 (u.path.rsplit("/", 2)[0] if u.path.count("/") > 2 else back), err=str(exc))
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
             return self.redirect("/", err=f"Unexpected error: {type(exc).__name__}. See terminal.")
 
-    def post_event(self, pid, f, actor, back):
-        t = f.get("type")
-        key = f"form-{f.get('key')}" if f.get("key") else None
-        if t == "vitals":
-            data = {}
-            for k in ("sbp", "dbp", "hr", "rr", "spo2", "fhr", "temp_c"):
-                if f.get(k, "").strip():
-                    try:
-                        data[k] = float(f[k]) if k == "temp_c" else int(float(f[k]))
-                    except ValueError:
-                        return self.redirect(back + "#bedside", err=f"{k} must be a number.")
-            if not data:
-                return self.redirect(back + "#bedside", err="Enter at least one observation.")
-            data["avpu"] = f.get("avpu", "alert")
+    def post_login(self, f, ip):
+        if _ip_blocked(ip):
+            return self.redirect("/login", err="Too many failed sign-ins from this computer. Wait 15 minutes.")
+        try:
             with LOCK:
-                r = events.record_event(CONN, pid, "vitals", data, entered_by=actor, key=key)
-            if r["duplicate"]:
-                return self.redirect(back + "#timeline", msg="Already saved (duplicate submission ignored).")
-            return self.redirect(back + ("#alerts" if r["alert_id"] else "#timeline"),
-                                 msg=f"Observations saved as E{r['event_id']}." + (f" RED FLAG raised (A{r['alert_id']}) – consultant notified." if r["alert_id"] else " No red flags."))
-        if t == "med_admin":
-            data = {"item_code": f.get("item_code"), "qty": f.get("qty"), "dose": f.get("dose", ""), "route": f.get("route", "")}
-        elif t == "service":
-            data = {"code": f.get("code"), "qty": f.get("qty")}
-        elif t == "note":
-            text = (f.get("text") or "").strip()
-            if not text:
-                return self.redirect(back + "#bedside", err="Note is empty.")
-            data = {"text": text[:4000]}
-        else:
-            return self.redirect(back, err="Unknown entry type.")
+                u = auth.authenticate(CONN, f.get("username", ""), f.get("password", ""), ip)
+                auth.end_session(CONN, self.token, u["username"]) if self.token else None  # no session fixation
+                token = auth.start_session(CONN, u["id"], ip)
+        except auth.AuthError as exc:
+            FAILED_BY_IP.setdefault(ip, []).append(time.time())
+            return self.redirect("/login", err=str(exc))
+        nxt = f.get("next") or "/"
+        return self.redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else "/", cookie=auth.cookie_header(token))
+
+    def post_api(self, path, f, user):
+        if path != "/api/ask":
+            return self.send_json({"error": "Unknown endpoint"}, 404)
+        if not auth.can(user, "ask_ai"):
+            return self.send_json({"error": "Your role cannot use the assistant."}, 403)
+        q = (f.get("q") or "").strip()[:1000]
+        if not q:
+            return self.send_json({"error": "Type a question."}, 400)
+        focus = f.get("focus")
+        focus = int(focus) if str(focus or "").isdigit() else None
         with LOCK:
-            r = events.record_event(CONN, pid, t, data, entered_by=actor, key=key)
+            hist = [{"role": r["role"], "content": r["content"]} for r in
+                    CONN.execute("SELECT role, content FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 6", (user["id"],)).fetchall()[::-1]]
+            n0 = CONN.execute("SELECT COALESCE(MAX(id),0) FROM usage").fetchone()[0]
+            try:
+                res = qa.ask(CONN, q, focus_pid=focus, history=hist, user_id=user["id"], can_see_bills=auth.can(user, "view_bills"))
+            except (llm.BudgetExceeded, llm.ModelUnavailable) as exc:
+                return self.send_json({"error": str(exc)}, 429 if isinstance(exc, llm.BudgetExceeded) else 503)
+            tok = CONN.execute("SELECT COALESCE(SUM(input_tokens+output_tokens),0) FROM usage WHERE id>?", (n0,)).fetchone()[0]
+            meta = {"steps": res["steps"], "tools": [t["tool"] for t in res["trace"]], "invalid": res["check"]["invalid"],
+                    "has_citations": res["check"]["has_citations"], "blocked": res.get("blocked", False), "tokens": tok}
+            CONN.execute("INSERT INTO chat_messages (user_id, ts, role, content, meta) VALUES (?,?,?,?,?)", (user["id"], db.now(), "user", q, None))
+            CONN.execute("INSERT INTO chat_messages (user_id, ts, role, content, meta) VALUES (?,?,?,?,?)",
+                         (user["id"], db.now(), "assistant", res["answer"], json.dumps(meta)))
+            db.audit(CONN, user["username"], "assistant_question", {"focus": focus, "steps": res["steps"], "blocked": meta["blocked"]})
+            CONN.commit()
+        return self.send_json({"user_html": views.chat_bubble_html("user", q, {}),
+                               "bot_html": views.chat_bubble_html("assistant", res["answer"], meta)})
+
+    def route_post(self, path, f, files, user):
+        who = user["label"]
+        if path == "/account/password":
+            with LOCK:
+                row = CONN.execute("SELECT username FROM users WHERE id=?", (user["id"],)).fetchone()
+                auth.authenticate(CONN, row["username"], f.get("current", ""), self.client_address[0])
+                if f.get("new") != f.get("confirm"):
+                    raise auth.AuthError("The two new passwords do not match.")
+                auth.set_password(CONN, user["id"], f.get("new", ""), actor=user["username"])
+                token = auth.start_session(CONN, user["id"], self.client_address[0])
+            return self.redirect("/", msg="Password changed. Other sessions were signed out.", cookie=auth.cookie_header(token))
+        if path == "/admin/users":
+            self.need(user, "manage_users")
+            with LOCK:
+                auth.create_user(CONN, f.get("username", ""), f.get("full_name", ""), f.get("role", ""), f.get("password", ""), actor=user["username"])
+            return self.redirect("/admin/users", msg="Account created. They must choose their own password at first sign-in.")
+        if m := re.fullmatch(r"/admin/users/(\d+)/(toggle|reset|unlock)", path):
+            self.need(user, "manage_users")
+            uid, act = int(m.group(1)), m.group(2)
+            if uid == user["id"]:
+                raise Forbidden("Use My account to change your own account.")
+            with LOCK:
+                if act == "toggle":
+                    CONN.execute("UPDATE users SET active=1-active WHERE id=?", (uid,))
+                    CONN.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+                elif act == "unlock":
+                    CONN.execute("UPDATE users SET locked_until=NULL, failed_attempts=0 WHERE id=?", (uid,))
+                else:
+                    auth.set_password(CONN, uid, f.get("password", ""), actor=user["username"], must_change=True)
+                db.audit(CONN, user["username"], f"user_{act}", {"user_id": uid})
+                CONN.commit()
+            return self.redirect("/admin/users", msg="Done.")
+        if path == "/admit":
+            self.need(user, "admit")
+            with LOCK:
+                pid = intake.new_admission(CONN, f, who)
+            return self.redirect(f"/patient/{pid}#admission", msg="Registered. Now attach the handwritten admission papers.")
+        if m := re.fullmatch(r"/alerts/(\d+)/ack", path):
+            self.need(user, "ack_alert")
+            with LOCK:
+                events.acknowledge_alert(CONN, int(m.group(1)), who)
+            return self.redirect(f.get("back") or "/alerts", msg="Alert acknowledged.")
+        if m := re.fullmatch(r"/drafts/(\d+)/approve", path):
+            self.need(user, "approve_draft")
+            with LOCK:
+                drafts.approve(CONN, int(m.group(1)), who)
+            return self.redirect(f.get("back") or "/", msg="Approved and signed with your name.")
+        if m := re.fullmatch(r"/reminders/(\d+)/(authorise|cancel|send|email)", path):
+            rid, act = int(m.group(1)), m.group(2)
+            self.need(user, "authorise_reminders" if act in ("authorise", "send") else "draft_reminders")
+            with LOCK:
+                if act == "authorise":
+                    reminders.authorise(CONN, rid, who)
+                    note = "Authorised. It will be sent on its due date."
+                elif act == "send":
+                    note = "Sent via " + reminders.deliver(CONN, rid, who)
+                elif act == "cancel":
+                    reminders.cancel(CONN, rid, who)
+                    note = "Cancelled."
+                else:
+                    reminders.set_email(CONN, rid, f.get("email", ""), who)
+                    note = "Email saved."
+            return self.redirect("/reminders", msg=note)
+        if m := re.fullmatch(r"/billing/(\d+)/pay", path):
+            self.need(user, "take_payment")
+            with LOCK:
+                discharge.record_payment(CONN, int(m.group(1)), f.get("mode", ""), who)
+            return self.redirect("/billing", msg="Payment recorded.")
+        if path == "/inventory/restock":
+            self.need(user, "restock")
+            qty = int(f.get("qty") or 0)
+            reason = (f.get("reason") or "").strip()[:120]
+            if not 1 <= qty <= 10000 or not reason:
+                raise ValueError("Enter a quantity (1–10000) and the supplier / batch.")
+            with LOCK:
+                if not CONN.execute("SELECT 1 FROM inventory WHERE item_code=?", (f.get("item_code"),)).fetchone():
+                    raise ValueError("Unknown item.")
+                CONN.execute("UPDATE inventory SET stock=stock+? WHERE item_code=?", (qty, f["item_code"]))
+                CONN.execute("INSERT INTO stock_ledger (item_code, delta, event_id, ts, reason, by_user) VALUES (?,?,NULL,?,?,?)",
+                             (f["item_code"], qty, db.now(), f"Received: {reason}", who))
+                db.audit(CONN, who, "stock_received", {"item": f["item_code"], "qty": qty})
+                CONN.commit()
+            return self.redirect("/inventory", msg="Stock received.")
+        if m := re.fullmatch(r"/patient/(\d+)/(\w+)", path):
+            return self.post_patient(int(m.group(1)), m.group(2), f, files, user)
+        return self.redirect("/", err="Unknown action.")
+
+    def post_patient(self, pid, action, f, files, user):
+        who, back = user["label"], f"/patient/{pid}"
+        p = CONN.execute("SELECT * FROM patients WHERE id=?", (pid,)).fetchone()
+        if not p:
+            return self.redirect("/", err="Unknown patient.")
+        if action == "event":
+            return self.post_event(p, f, user)
+        if action in ("upload", "sample"):
+            self.need(user, "upload_papers")
+            if action == "sample":
+                samples = {x.name: x for x in (config.DATA / "samples").iterdir()}  # whitelist, no path traversal
+                path = samples.get(f.get("which") or "")
+                if not path:
+                    return self.redirect(back + "#admission", err="Unknown sample.")
+                content, fname = path.read_bytes(), path.name
+                doc_type = "other" if "injection" in fname else "opd_note"
+            else:
+                fname, content = files.get("file", ("", b""))
+                doc_type = f.get("doc_type", "other")
+                if not content:
+                    return self.redirect(back + "#admission", err="Choose a file first.")
+            with LOCK:
+                did = extract.add_document(CONN, pid, fname, content, who, doc_type)
+            return self.redirect(back + "#admission", msg=f"Uploaded as D{did}. Click “Read with AI”.")
+        if action == "extract":
+            self.need(user, "upload_papers")
+            with LOCK:
+                r = extract.run(CONN, pid, int(f["document_id"]), who, user_id=user["id"])
+            total, review = extract.review_count(r["data"])
+            note = " (identical file read before – reused, no AI cost)" if r["reused"] else ""
+            inj = " Instructions inside the paper were detected and ignored." if r["data"].get("embedded_instructions") else ""
+            return self.redirect(back + "#admission", msg=f"Read {total} items; please verify the highlighted ones. "
+                                                          f"{r['vitals_events']} vital-sign sets checked against red-flag rules.{note}{inj}")
+        if action == "review":
+            self.need(user, "verify_papers")
+            with LOCK:
+                intake.review(CONN, pid, int(f.get("extraction_id") or 0), f.get("field_key", ""), f.get("state", ""), f.get("corrected", ""), who)
+            return self.redirect(back + "#admission", msg="Saved.")
+        if action == "complete_intake":
+            self.need(user, "verify_papers")
+            with LOCK:
+                intake.complete(CONN, pid, f, who)
+            return self.redirect(back, msg="Admission complete. Allergies, blood group and history are now doctor-verified.")
+        if action == "draft":
+            self.need(user, "draft")
+            kind = f.get("kind")
+            if kind not in drafts.KINDS:
+                return self.redirect(back, err="Unknown draft type.")
+            with LOCK:
+                drafts.generate(CONN, pid, kind, who, user_id=user["id"])
+            return self.redirect(back + "#docs", msg="Draft created – review the grounding check before approving.")
+        if action == "discharge":
+            self.need(user, "discharge")
+            days = f.get("follow_up_days")
+            with LOCK:
+                r = discharge.finalize(CONN, pid, who, follow_up_days=int(days) if str(days or "").isdigit() else None,
+                                       follow_up_note=f.get("follow_up_note", ""), deferral_note=f.get("deferral_note", ""),
+                                       email=f.get("email", ""))
+            return self.redirect(back + "#docs", msg=f"Discharged. Final family bill ₹{r['bill_total']:,.0f}. "
+                                                     f"{r['reminders_drafted']} email reminder(s) drafted for consultant authorisation.")
+        return self.redirect(back, err="Unknown action.")
+
+    def post_event(self, p, f, user):
+        pid, t = p["id"], f.get("type")
+        perm = {"vitals": "enter_obs", "labour": "enter_obs", "newborn_obs": "enter_obs", "note": "enter_obs", "service": "enter_obs",
+                "med_admin": "give_meds", "vaccine": "give_meds", "investigation": "enter_labs", "delivery": "record_delivery"}.get(t)
+        if not perm:
+            return self.redirect(f"/patient/{pid}", err="Unknown entry type.")
+        self.need(user, perm)
+        anchor = {"labour": "labour", "delivery": "labour", "newborn_obs": "newborn", "vaccine": "vaccines"}.get(t, "bedside")
+        f["anchor"] = anchor
+        ts = None
+        if t == "investigation":
+            data = {"test": f.get("test"), "result_text": f.get("result_text"), "code": f.get("code") or None,
+                    "values": {k[4:]: v for k, v in f.items() if k.startswith("lab_") and v.strip()}}
+        elif t == "vaccine":
+            dose, route = VACCINE_ROUTE.get(f.get("code"), ("", ""))
+            data = {"code": f.get("code"), "batch": (f.get("batch") or "").strip()[:40], "dose": dose, "route": route}
+        elif t == "delivery":
+            data = dict(f)
+            if f.get("delivered_at"):
+                when = datetime.strptime(f["delivered_at"][:16], "%Y-%m-%dT%H:%M")
+                if when > datetime.now():
+                    raise events.EventError("Time of birth cannot be in the future.")
+                ts = when.strftime(db.FMT)
+        else:
+            data = {k: v for k, v in f.items() if k not in ("csrf", "key", "type", "anchor")}
+        key = f"form-{user['id']}-{f.get('key')}" if f.get("key") else None
+        with LOCK:
+            r = events.record_event(CONN, pid, t, data, ts=ts, entered_by=user["label"], key=key, actor_role=user["role"])
+        back = f"/patient/{pid}"
         if r["duplicate"]:
             return self.redirect(back + "#timeline", msg="Already saved (duplicate submission ignored).")
-        return self.redirect(back + "#timeline", msg=f"Saved as E{r['event_id']}.")
+        if r.get("baby_id"):
+            return self.redirect(f"/patient/{r['baby_id']}", msg=f"Delivery saved (E{r['event_id']}). Baby's record created – please record newborn "
+                                                                f"observations and birth doses." + (" Alerts raised for the consultant." if r["alerts"] else ""))
+        note = f" {len(r['alerts'])} alert(s) raised – consultant notified." if r["alerts"] else ""
+        return self.redirect(back + (f"#alerts" if r["alerts"] else f"#{anchor}"), msg=f"Saved as E{r['event_id']}.{note}")
+
+
+def reminder_loop():
+    while True:
+        time.sleep(60)
+        try:
+            with LOCK:
+                reminders.send_due(CONN)
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
 
 
 def main():
@@ -574,6 +475,7 @@ def main():
         print("WARNING: PORTKEY_API_KEY not found in .env (repo folder or the folder above). AI buttons will show an error.")
     print(f"CareFlow AI running at http://127.0.0.1:{port}   (Ctrl+C to stop)")
     print(f".env files loaded: {', '.join(config.ENV_FILES) or 'none'}")
+    threading.Thread(target=reminder_loop, daemon=True).start()
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     if "--no-browser" not in sys.argv:
         threading.Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()

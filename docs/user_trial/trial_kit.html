@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CareFlow AI – clinician trial kit</title>
+<style>
+:root{--ink:#1d2f4a;--muted:#5f7190;--line:#e2ebf7;--bg:#f7faff;--blue:#2f6bc2;--btn:#cfe2fb;--btnh:#b7d3f8;--soft:#eef5fe;--green:#17703f;--greenbg:#e2f6ea;--red:#b42323;--redbg:#ffe4e4}
+*{box-sizing:border-box}body{margin:0;font:15px/1.55 "Segoe UI",system-ui,Arial,sans-serif;color:var(--ink);background:var(--bg)}
+header{background:linear-gradient(90deg,#fff,#eaf3fe 60%,#dcebfd);padding:14px 24px;border-bottom:1px solid var(--line)}
+header h1{margin:0;font-size:22px}header p{margin:2px 0 0;color:var(--muted)}
+main{max-width:1050px;margin:0 auto;padding:20px 20px 80px}
+.card{background:#fff;border:1px solid var(--line);border-radius:16px;padding:16px 20px;margin-bottom:16px;box-shadow:0 2px 12px rgba(47,107,194,.06)}
+h2{font-size:18px;margin:0 0 8px;color:var(--blue)}h3{font-size:15px;margin:12px 0 6px}
+.muted{color:var(--muted)}.small{font-size:13px}
+label{font-size:13px;color:var(--muted);display:block;margin:6px 0 2px}
+input,select,textarea{font:inherit;font-size:14px;padding:6px 9px;border:1px solid #d3e0f2;border-radius:9px;width:100%;background:#fff;color:var(--ink)}
+textarea{min-height:56px}
+.row{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:850px){.two{grid-template-columns:1fr}}
+.cond{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:#fbfdff}
+.cond.today{border-top:4px solid #9fb8d8}.cond.cf{border-top:4px solid var(--blue)}
+.cond h3{margin-top:0;display:flex;justify-content:space-between;align-items:center}
+.order{font-size:12px;background:var(--soft);color:var(--blue);border-radius:999px;padding:1px 9px}
+.timer{display:flex;align-items:center;gap:8px;margin:8px 0;flex-wrap:wrap}
+.clock{font:600 28px/1 Consolas,monospace;min-width:110px;background:var(--soft);border-radius:10px;padding:8px 10px;text-align:center}
+.clock.run{background:#dcebfd;color:var(--blue)}
+button{font:inherit;font-weight:600;border:0;border-radius:9px;padding:6px 14px;background:var(--btn);color:var(--ink);cursor:pointer}
+button:hover{background:var(--btnh)}button.ghost{background:#fff;border:1px solid var(--line);color:var(--muted)}
+ol.steps{margin:4px 0 8px;padding-left:20px}ol.steps li{margin:2px 0}
+.check{display:flex;gap:8px;align-items:flex-start;font-size:14px;margin:3px 0}.check input{width:auto;margin-top:4px}
+.score{font-weight:600;color:var(--blue)}
+.likert{display:flex;gap:4px;flex-wrap:wrap}.likert label{display:flex;gap:4px;align-items:center;margin:0 8px 0 0;color:var(--ink);font-size:14px}.likert input{width:auto}
+table{width:100%;border-collapse:collapse;font-size:14px}th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left}th{font-size:12px;text-transform:uppercase;color:var(--muted)}
+.num{text-align:right}.good{color:var(--green);font-weight:600}.bad{color:var(--red);font-weight:600}
+.pill{display:inline-block;border-radius:999px;padding:1px 10px;font-size:12px;background:var(--soft);color:var(--blue);font-weight:600}
+.note{background:var(--soft);border-radius:10px;padding:8px 12px;font-size:14px}
+.saved{position:fixed;bottom:14px;right:14px;background:#fff;border:1px solid var(--line);border-radius:999px;padding:4px 12px;font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body>
+<header><h1>CareFlow AI – clinician trial kit</h1>
+<p>Run this on the observer’s laptop. Each task is done twice – <b>today’s way</b> (paper packet) and <b>with CareFlow</b> – and timed. Everything autosaves in this browser; export at the end.</p></header>
+<main>
+
+<div class="card"><h2>Before you start (5 min)</h2>
+<ol class="steps">
+<li><b>Reset the demo data</b> so every trial starts the same: stop the app, rename <code>data/careflow.db</code> (e.g. to <code>careflow.db.bak</code>), start <code>python app.py</code> again.</li>
+<li><b>Make the paper packet</b>: <code>python docs/user_trial/make_paper_packet.py</code> → open and print <code>docs/user_trial/paper_packet.html</code> (or show it on a second screen).</li>
+<li>Open CareFlow at <b>http://127.0.0.1:8050</b> in the participant’s browser. He signs in as <b>dr.mehta</b> / <b>mehta-demo-2026</b> (consultant – can do every step).</li>
+<li>Give a 3-minute tour only: Ward → a patient page → Ask CareFlow. Do not practise the tasks.</li>
+<li>Rules for the observer: start the clock when you finish reading the task aloud; stop when he says “done”. Don’t help unless he is stuck for 60 s (note it).
+The order of “today” and “CareFlow” alternates between tasks to reduce learning bias.</li>
+</ol>
+<div class="row">
+<div><label>Participant (initials or role only)</label><input id="p_name" placeholder="e.g. Obstetrician, owner of 25-bed hospital"></div>
+<div><label>Years in practice</label><input id="p_years" type="number"></div>
+<div><label>Hospital beds</label><input id="p_beds" type="number" value="25"></div>
+<div><label>Deliveries per month</label><input id="p_deliveries" type="number"></div>
+<div><label>Doctors + nurses on the ward</label><input id="p_staff"></div>
+<div><label>Date</label><input id="p_date" type="date"></div>
+</div>
+<div class="check"><input type="checkbox" id="consent"><label for="consent" style="margin:0;color:var(--ink)">He agrees to take part, understands all patients are synthetic, and may stop at any time.</label></div>
+<div class="check"><input type="checkbox" id="quote_ok"><label for="quote_ok" style="margin:0;color:var(--ink)">He agrees that his comments may be quoted (without his name) in the course report.</label></div>
+</div>
+
+<div id="tasks"></div>
+
+<div class="card"><h2>After the tasks – 5 quick questions</h2>
+<p class="muted small">1 = strongly disagree, 5 = strongly agree</p>
+<div id="likert"></div>
+<div class="two">
+<div><label>Most useful part</label><textarea id="q_useful"></textarea></div>
+<div><label>What is missing, wrong or would stop you using it?</label><textarea id="q_missing"></textarea></div>
+<div><label>Today, how long does a shift handover take per patient? (minutes)</label><input id="q_handover_min" type="number"></div>
+<div><label>Today, how long does billing take per discharge? (minutes)</label><input id="q_bill_min" type="number"></div>
+<div><label>Billing errors / disputes today (per month, rough)</label><input id="q_bill_errors"></div>
+<div><label>What would a tool like this be worth per month to the hospital? (₹)</label><input id="q_wtp"></div>
+</div>
+<label>A sentence in his own words (only if he agreed to be quoted)</label><textarea id="q_quote"></textarea>
+</div>
+
+<div class="card"><h2>Results</h2>
+<div id="summary"></div>
+<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+<button id="export_json">Download results (JSON)</button><button id="export_csv">Download table (CSV)</button>
+<button id="copy">Copy summary</button><button class="ghost" id="reset">Clear all answers</button></div>
+<p class="muted small">Save the downloaded files in <code>docs/user_trial/results/</code>. They stay on this computer unless you choose to commit them.</p>
+</div>
+</main>
+<div class="saved" id="saved">autosaved</div>
+
+<script>
+"use strict";
+const TASKS = [
+ {id:"t1", title:"Task 1 – Admission papers (Meera Sharma)", first:"today",
+  goal:"Turn the handwritten OPD + progress note into a complete admission record.",
+  today:["Packet → Task 1: read the note, fill the admission sheet by hand."],
+  cf:["Ward → <b>Meera Sharma</b> → Admission papers → <b>Attach sample</b> → <b>Read with AI</b> (wait ~30 s).",
+      "Go down the highlighted rows: <b>✓ Correct</b>, type a fix + <b>Save fix</b>, or <b>✗ Not on paper</b>.",
+      "Fill the admission checklist (blood group is not on the paper – he decides) → <b>Complete admission</b>."],
+  checks:["Name Meera Sharma (not ‘Meena’)","Age 28, G2P1L1","37+2 weeks, LMP 3/2/26, EDD 10/11/26","Penicillin allergy",
+          "BP 150/100 and 160/110 both captured","Diagnosis: gestational HTN, ? pre-eclampsia kept as a query","Labetalol 100 → 200 mg BD",
+          "Inj MgSO4 per protocol","Labs: Hb 10.8, platelets 1.2 lakh, SGOT 48","Plan: IOL today, inform consultant","Blood group noted as missing / asked"]},
+ {id:"t2", title:"Task 2 – Labour check and delivery (Priya Verma)", first:"cf",
+  goal:"Record one labour check, then the delivery, and get the baby registered and billed.",
+  today:["Packet → Task 2: write the labour register entry, birth register, open the baby’s file, list the charges for billing."],
+  cf:["Ward → <b>Priya Verma</b> → Labour & delivery → <b>Add labour check</b> with the values on the card → Save.",
+      "<b>Record delivery outcome</b> with the delivery values → Save (lands on the baby’s new record)."],
+  checks:["Labour check complete (cx, descent, contractions, FHR, liquor, moulding, BP, pulse)","Delivery: NVD, live girl, 3,050 g, APGAR 8/9",
+          "Blood loss 350 ml, placenta complete, 1st-degree tear","Baby record / file opened and linked to mother",
+          "Delivery charges identified (surgeon fee, labour room, baby care, lactation)","Partograph / progress visible to next shift"]},
+ {id:"t3", title:"Task 3 – Shift handover (Sunita Devi)", first:"today",
+  goal:"Prepare the handover for the night doctor.",
+  today:["Packet → Task 3: read Sunita’s and her baby’s case sheets, write an SBAR handover."],
+  cf:["Ward → <b>Sunita Devi</b> → Handover & discharge → <b>Draft shift handover</b> (~20 s).",
+      "Read it, check the grounding badge and any highlighted numbers, edit nothing → <b>Approve</b>."],
+  checks:["NVD ~6–7 h ago, 2nd-degree tear","Blood loss 450 ml (near PPH threshold)","Latest obs abnormal: BP 96/60, HR 118, RR 22 → PPH watch",
+          "Oxytocin 10 IU given","No known drug allergies","Baby boy 2.9 kg, feeding well","Baby BCG + Hep B still due","Clear ‘what to watch / do tonight’"]},
+ {id:"t4", title:"Task 4 – Ward question", first:"cf",
+  goal:"“Which babies still need their Hepatitis B birth dose, and which mothers have abnormal latest observations?”",
+  today:["Packet → Task 4 (+ Task 3 sheets): look through all the case sheets."],
+  cf:["<b>Ask CareFlow</b> (dashboard panel) → type the question → Enter. He may check the cited entries."],
+  checks:["Baby boy of Sunita Devi needs Hep B","Baby girl of Kavita Yadav has had Hep B (not listed)","Sunita Devi: abnormal (BP 96/60, HR 118, RR 22)",
+          "Meera Sharma: BP 146/96 mildly raised","Priya and Kavita correctly not listed as abnormal"]},
+ {id:"t5", title:"Task 5 – Discharge bill (Kavita Yadav + baby)", first:"today",
+  goal:"Produce the family’s final bill.",
+  today:["Packet → Task 5: from ‘what was done’ and the price list, work out every line and the total (calculator allowed)."],
+  cf:["Billing (top menu) → <b>Kavita Yadav</b> → View / print. Check it."],
+  checks:["Registration, room, nursing, RMO by days","LSCS surgeon + assistant + OT + anaesthesia","Baby care + lactation counselling",
+          "Medicines and baby vaccines included","No item charged twice","Total matches the app’s total"],
+  extra:[["today_total","His total today (₹)"],["app_total","CareFlow total (₹)"]]},
+];
+const LIKERT = [["l_easy","It was easy to use without training."],["l_trust","After verification, I would trust the admission record."],
+  ["l_time","It would save my staff time every day."],["l_safe","The red flags, allergy block and approvals make it safer."],
+  ["l_use","I would use it in my hospital."]];
+
+const KEY="careflow_trial_v1"; let S=JSON.parse(localStorage.getItem(KEY)||"{}"); S.t=S.t||{};
+const $=id=>document.getElementById(id);
+function save(){localStorage.setItem(KEY,JSON.stringify(S));$("saved").textContent="autosaved "+new Date().toLocaleTimeString();summary();}
+const fmt=s=>{s=Math.round(s||0);return String(Math.floor(s/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0");};
+
+function condHTML(t,c){
+  const isToday=c==="today", label=isToday?"Today’s way":"With CareFlow", ord=(t.first===c)?"do 1st":"do 2nd";
+  const steps=(isToday?t.today:t.cf).map(s=>"<li>"+s+"</li>").join("");
+  const checks=t.checks.map((x,i)=>`<div class="check"><input type="checkbox" data-k="${t.id}.${c}.c${i}"><span>${x}</span></div>`).join("");
+  return `<div class="cond ${isToday?"today":"cf"}"><h3>${label}<span class="order">${ord}</span></h3><ol class="steps">${steps}</ol>
+  <div class="timer"><span class="clock" id="clk_${t.id}_${c}">00:00</span><button data-start="${t.id}.${c}">Start</button><button data-stop="${t.id}.${c}">Stop</button><button class="ghost" data-clear="${t.id}.${c}">Reset</button></div>
+  <label>Seconds (edit if a clock was missed)</label><input type="number" min="0" data-sec="${t.id}.${c}">
+  <h3>Quality checklist <span class="score" id="sc_${t.id}_${c}"></span></h3>${checks}
+  <div class="row"><div><label>Times he needed help</label><input type="number" min="0" data-k="${t.id}.${c}.help"></div>
+  <div><label>Errors noticed</label><input type="number" min="0" data-k="${t.id}.${c}.errors"></div></div>
+  <label>Observer notes / what he said</label><textarea data-k="${t.id}.${c}.notes"></textarea></div>`;
+}
+$("tasks").innerHTML=TASKS.map(t=>`<div class="card"><h2>${t.title}</h2><p class="note"><b>Goal:</b> ${t.goal}</p>
+ <div class="two">${condHTML(t,t.first)}${condHTML(t,t.first==="today"?"cf":"today")}</div>
+ ${(t.extra||[]).length?'<div class="row">'+t.extra.map(([k,l])=>`<div><label>${l}</label><input data-k="${t.id}.${k}"></div>`).join("")+"</div>":""}
+ <label>His estimate: how long does this take on a normal day in his hospital? (minutes)</label><input type="number" data-k="${t.id}.estimate_min"></div>`).join("");
+$("likert").innerHTML=LIKERT.map(([k,q])=>`<div style="margin:6px 0"><div>${q}</div><div class="likert">${[1,2,3,4,5].map(v=>`<label><input type="radio" name="${k}" value="${v}" data-k="${k}">${v}</label>`).join("")}</div></div>`).join("");
+
+// ---- timers
+const running={};
+function secs(id){const r=S.t[id]||{acc:0};return r.acc+(r.start?(Date.now()-r.start)/1000:0);}
+function tick(){Object.keys(S.t).forEach(id=>{const el=$("clk_"+id.replace(".","_"));if(el){el.textContent=fmt(secs(id));el.classList.toggle("run",!!S.t[id].start);}
+ const inp=document.querySelector(`[data-sec="${id}"]`);if(inp&&document.activeElement!==inp)inp.value=Math.round(secs(id))||"";});}
+setInterval(tick,500);
+document.addEventListener("click",ev=>{const b=ev.target;
+ if(b.dataset.start){const r=S.t[b.dataset.start]||(S.t[b.dataset.start]={acc:0});if(!r.start)r.start=Date.now();save();}
+ if(b.dataset.stop){const r=S.t[b.dataset.stop];if(r&&r.start){r.acc+=(Date.now()-r.start)/1000;r.start=null;}save();}
+ if(b.dataset.clear){if(confirm("Reset this clock?")){S.t[b.dataset.clear]={acc:0};save();}}});
+document.addEventListener("input",ev=>{const el=ev.target;
+ if(el.dataset.sec){S.t[el.dataset.sec]={acc:Number(el.value)||0,start:null};save();return;}
+ const k=el.dataset.k||el.id; if(!k)return; S[k]=el.type==="checkbox"?el.checked:el.value; save();});
+// restore
+document.querySelectorAll("[data-k],input[id],textarea[id]").forEach(el=>{const k=el.dataset.k||el.id;if(!(k in S))return;
+ if(el.type==="checkbox")el.checked=!!S[k];else if(el.type==="radio")el.checked=String(S[k])===el.value;else el.value=S[k];});
+
+// ---- summary
+function quality(t,c){const n=t.checks.length;let k=0;for(let i=0;i<n;i++)if(S[`${t.id}.${c}.c${i}`])k++;return [k,n];}
+function rows(){return TASKS.map(t=>{const a=secs(t.id+".today"),b=secs(t.id+".cf"),[qa,n]=quality(t,"today"),[qb]=quality(t,"cf");
+ return {task:t.title,today_s:Math.round(a),careflow_s:Math.round(b),saved_pct:a&&b?Math.round((1-b/a)*100):null,
+  quality_today:qa+"/"+n,quality_careflow:qb+"/"+n,help_today:S[t.id+".today.help"]||0,help_cf:S[t.id+".cf.help"]||0,estimate_min:S[t.id+".estimate_min"]||""};});}
+function summary(){
+ TASKS.forEach(t=>["today","cf"].forEach(c=>{const [k,n]=quality(t,c);const el=$("sc_"+t.id+"_"+c);if(el)el.textContent=k+"/"+n;}));
+ const r=rows();const ta=r.reduce((s,x)=>s+x.today_s,0),tb=r.reduce((s,x)=>s+x.careflow_s,0);
+ $("summary").innerHTML=`<table><tr><th>Task</th><th class="num">Today</th><th class="num">CareFlow</th><th class="num">Time saved</th><th>Quality today</th><th>Quality CareFlow</th></tr>`+
+ r.map(x=>`<tr><td>${x.task}</td><td class="num">${fmt(x.today_s)}</td><td class="num">${fmt(x.careflow_s)}</td><td class="num ${x.saved_pct>0?"good":x.saved_pct<0?"bad":""}">${x.saved_pct===null?"—":x.saved_pct+"%"}</td><td>${x.quality_today}</td><td>${x.quality_careflow}</td></tr>`).join("")+
+ `<tr><th>Total</th><th class="num">${fmt(ta)}</th><th class="num">${fmt(tb)}</th><th class="num">${ta&&tb?Math.round((1-tb/ta)*100)+"%":"—"}</th><th></th><th></th></tr></table>`+
+ `<p class="small muted">Likert: ${LIKERT.map(([k])=>k.slice(2)+" "+(S[k]||"–")).join(" · ")}</p>`;}
+summary();
+
+function download(name,text,type){const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;a.click();}
+$("export_json").onclick=()=>{const out={exported_at:new Date().toISOString(),answers:S,times_s:Object.fromEntries(Object.keys(S.t).map(k=>[k,Math.round(secs(k))])),summary:rows()};
+ download("careflow_trial_results.json",JSON.stringify(out,null,2),"application/json");};
+$("export_csv").onclick=()=>{const r=rows();const h=Object.keys(r[0]);download("careflow_trial_results.csv",[h.join(",")].concat(r.map(x=>h.map(k=>JSON.stringify(x[k]??"")).join(","))).join("\n"),"text/csv");};
+$("copy").onclick=()=>{const r=rows();navigator.clipboard.writeText(r.map(x=>`${x.task}: today ${fmt(x.today_s)} (${x.quality_today}) vs CareFlow ${fmt(x.careflow_s)} (${x.quality_careflow})`).join("\n")+
+ "\nQuote: "+(S.quote_ok?(S.q_quote||""):"(not permitted)"));};
+$("reset").onclick=()=>{if(confirm("Clear every answer and timer?")){localStorage.removeItem(KEY);location.reload();}};
+</script>
+</body>
+</html>

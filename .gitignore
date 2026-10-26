@@ -2,7 +2,19 @@
 *.db
 *.db-journal
 data/uploads/
+data/outbox/
+docs/user_trial/results/
+docs/user_trial/paper_packet.html
+# submitted on Canvas, not published here (they include the trial participant's name and photo)
+docs/report.html
+docs/slides.html
+docs/*.pdf
+# the hospital's real price list stays private; demo prices are in data/seed.json
+data/CareFlow_price_list.xlsx
+*.bak
+~$*
 __pycache__/
 *.pyc
 .venv/
 venv/
+docs/build_report.py

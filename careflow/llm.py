@@ -30,28 +30,33 @@ def cost_usd(inp: int, cached: int, out: int) -> float:
     return (fresh * config.PRICE_INPUT + cached * config.PRICE_CACHED_INPUT + out * config.PRICE_OUTPUT) / 1_000_000
 
 
-def tokens_today(conn: sqlite3.Connection, patient_id: int | None = None) -> int:
+def tokens_today(conn: sqlite3.Connection, patient_id: int | None = None, user_id: int | None = None) -> int:
     q = "SELECT COALESCE(SUM(input_tokens + output_tokens),0) FROM usage WHERE substr(ts,1,10)=?"
     args: list = [date.today().isoformat()]
     if patient_id is not None:
         q += " AND patient_id=?"
         args.append(patient_id)
+    if user_id is not None:
+        q += " AND user_id=?"
+        args.append(user_id)
     return int(conn.execute(q, args).fetchone()[0])
 
 
-def check_budget(conn: sqlite3.Connection, patient_id: int | None) -> None:
+def check_budget(conn: sqlite3.Connection, patient_id: int | None, user_id: int | None = None) -> None:
     if tokens_today(conn) >= config.DAILY_TOKEN_BUDGET:
         raise BudgetExceeded(f"Daily AI budget of {config.DAILY_TOKEN_BUDGET:,} tokens reached. "
                              "AI features are paused until tomorrow; manual entry still works.")
     if patient_id is not None and tokens_today(conn, patient_id) >= config.PER_PATIENT_DAILY_BUDGET:
         raise BudgetExceeded(f"This patient's daily AI budget ({config.PER_PATIENT_DAILY_BUDGET:,} tokens) is used up.")
+    if user_id is not None and tokens_today(conn, user_id=user_id) >= config.USER_DAILY_BUDGET:
+        raise BudgetExceeded(f"Your personal daily AI budget ({config.USER_DAILY_BUDGET:,} tokens) is used up.")
 
 
-def _log(conn, feature, patient_id, inp, cached, out, latency, ok, note=""):
+def _log(conn, feature, patient_id, inp, cached, out, latency, ok, note="", user_id=None):
     conn.execute(
-        "INSERT INTO usage (ts, feature, patient_id, model, input_tokens, cached_tokens, output_tokens, cost_usd, latency_s, ok, note) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (now(), feature, patient_id, config.MODEL, inp, cached, out, cost_usd(inp, cached, out), round(latency, 2), int(ok), note),
+        "INSERT INTO usage (ts, feature, patient_id, user_id, model, input_tokens, cached_tokens, output_tokens, cost_usd, latency_s, ok, note) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (now(), feature, patient_id, user_id, config.MODEL, inp, cached, out, cost_usd(inp, cached, out), round(latency, 2), int(ok), note),
     )
     conn.commit()
 
@@ -75,13 +80,13 @@ MOCK_HANDLERS: dict = {}
 
 
 def chat(conn: sqlite3.Connection, feature: str, patient_id: int | None, messages: list,
-         tools: list | None = None, json_mode: bool = False, max_tokens: int | None = None):
+         tools: list | None = None, json_mode: bool = False, max_tokens: int | None = None, user_id: int | None = None):
     """Returns the OpenAI-style message object (has .content and .tool_calls)."""
-    check_budget(conn, patient_id)
+    check_budget(conn, patient_id, user_id)
     t0 = time.time()
     if config.MOCK:
         msg, usage = MOCK_HANDLERS[feature](messages, tools)
-        _log(conn, feature, patient_id, usage[0], usage[1], usage[2], time.time() - t0, True, "mock")
+        _log(conn, feature, patient_id, usage[0], usage[1], usage[2], time.time() - t0, True, "mock", user_id)
         return msg
     kwargs = dict(model=config.MODEL, messages=messages, max_completion_tokens=max_tokens or config.MAX_OUTPUT_TOKENS)
     if tools:
@@ -93,7 +98,7 @@ def chat(conn: sqlite3.Connection, feature: str, patient_id: int | None, message
     try:
         resp = _get_client().chat.completions.create(**kwargs)
     except Exception as exc:  # noqa: BLE001
-        _log(conn, feature, patient_id, 0, 0, 0, time.time() - t0, False, type(exc).__name__)
+        _log(conn, feature, patient_id, 0, 0, 0, time.time() - t0, False, type(exc).__name__, user_id)
         key = config.api_key()
         text = str(exc).replace(key, "<REDACTED>") if key else str(exc)
         if "content_filter" in text or "content management policy" in text:
@@ -104,7 +109,7 @@ def chat(conn: sqlite3.Connection, feature: str, patient_id: int | None, message
     details = getattr(u, "prompt_tokens_details", None)
     if details is not None:
         cached = getattr(details, "cached_tokens", 0) or 0
-    _log(conn, feature, patient_id, u.prompt_tokens, cached, u.completion_tokens, time.time() - t0, True)
+    _log(conn, feature, patient_id, u.prompt_tokens, cached, u.completion_tokens, time.time() - t0, True, "", user_id)
     return resp.choices[0].message
 
 
