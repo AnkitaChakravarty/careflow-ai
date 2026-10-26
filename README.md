@@ -68,6 +68,8 @@ Sample handwritten papers are in `data/samples/` and can be attached with one cl
 
 ## How it is built
 
+The agents, their tools, stopping rules and guardrails are documented in **[HARNESS.md](HARNESS.md)**.
+
 | Part | What it does | AI? |
 |---|---|---|
 | Record Reader (`careflow/extract.py`) | Vision model reads handwritten admission papers → validated JSON with page, confidence, verbatim text; flags embedded instructions | gpt-6-luna |
